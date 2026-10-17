@@ -3364,6 +3364,8 @@ menu_carrier() {
 }
 
 # ---- Bagher Engine [PRO] (No Web Dashboard) ----
+BAGHER_PSK="1234"
+
 cli_bagher() {
     local SUB="${1:-status}"
     case "$SUB" in
@@ -3397,12 +3399,13 @@ cli_bagher() {
             done
             [[ -z "$REMOTE_HOST" ]] && { echo -e "${RED}[!] --remote-host <IP> is required.${NC}"; return 1; }
             install_frp_binaries "all" || true
-            mkdir -p /root/.ssh
-            [[ -f /root/.ssh/hashem-fwd ]] || ssh-keygen -t ed25519 -N "" -f /root/.ssh/hashem-fwd -C "hashem-ssh-carrier" >/dev/null 2>&1
-            local PUBKEY=$(cat /root/.ssh/hashem-fwd.pub)
-            IFS=',' read -ra PORT_ARR <<< "$PORTS"
+            command -v sshpass >/dev/null 2>&1 || {
+                export DEBIAN_FRONTEND=noninteractive
+                { timeout 30 apt-get update -qq </dev/null && timeout 60 apt-get install -y -qq sshpass </dev/null; } 2>/dev/null || true
+            }
             local PORT_OPT=""
             [[ "$SSH_PORT" != "22" && -n "$SSH_PORT" ]] && PORT_OPT="-p $SSH_PORT"
+            IFS=',' read -ra PORT_ARR <<< "$PORTS"
 
             if [[ "$MODE" == "bagher" || "$MODE" == "frp_ssh" ]]; then
                 mkdir -p "${PANEL_CONFIG_DIR}/bagher"
@@ -3434,7 +3437,8 @@ Description=Hashem Bagher Engine Carrier (Reverse SSH tunnel)
 After=network-online.target hashem-bagher-frps.service
 
 [Service]
-ExecStart=/usr/bin/ssh -N -i /root/.ssh/hashem-fwd -o BatchMode=yes -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new -o TCPKeepAlive=yes -R 127.0.0.1:${FRP_PORT}:127.0.0.1:${FRP_PORT} ${PORT_OPT} ${USER}@${REMOTE_HOST}
+Environment=SSHPASS=${BAGHER_PSK}
+ExecStart=/usr/bin/sshpass -e /usr/bin/ssh -N -o BatchMode=no -o PreferredAuthentications=password -o PubkeyAuthentication=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new -o TCPKeepAlive=yes -R 127.0.0.1:${FRP_PORT}:127.0.0.1:${FRP_PORT} ${PORT_OPT} ${USER}@${REMOTE_HOST}
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
@@ -3445,8 +3449,7 @@ EOF
                 systemctl daemon-reload
                 systemctl enable --now hashem-bagher-frps.service hashem-bagher.service
                 echo -e "${GREEN}[✔️] Bagher Engine [PRO] started.${NC}"
-                echo -e "\n${YELLOW}=== Foreign authorized_keys Entry ===${NC}"
-                echo "restrict,port-forwarding,permitlisten=\"127.0.0.1:${FRP_PORT}\" ${PUBKEY}"
+                echo -e "${YELLOW}[i] Make sure the SSH password on ${USER}@${REMOTE_HOST} is set to the shared PSK (\"${BAGHER_PSK}\") and that PasswordAuthentication is enabled in sshd_config on that server.${NC}"
             else
                 local FWD_ARGS=""
                 for p in "${PORT_ARR[@]}"; do
@@ -3459,7 +3462,8 @@ Description=Hashem Bagher Engine Carrier (Direct SSH tunnel)
 After=network-online.target
 
 [Service]
-ExecStart=/usr/bin/ssh -N -i /root/.ssh/hashem-fwd -o BatchMode=yes -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new ${PORT_OPT} ${FWD_ARGS} ${USER}@${REMOTE_HOST}
+Environment=SSHPASS=${BAGHER_PSK}
+ExecStart=/usr/bin/sshpass -e /usr/bin/ssh -N -o BatchMode=no -o PreferredAuthentications=password -o PubkeyAuthentication=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new ${PORT_OPT} ${FWD_ARGS} ${USER}@${REMOTE_HOST}
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
@@ -3470,6 +3474,7 @@ EOF
                 systemctl daemon-reload
                 systemctl enable --now hashem-bagher.service
                 echo -e "${GREEN}[✔️] Direct SSH Forward started.${NC}"
+                echo -e "${YELLOW}[i] Make sure the SSH password on ${USER}@${REMOTE_HOST} is set to the shared PSK (\"${BAGHER_PSK}\") and that PasswordAuthentication is enabled in sshd_config on that server.${NC}"
             fi
             ;;
         disable)
@@ -3480,33 +3485,22 @@ EOF
         stop) systemctl stop hashem-bagher.service hashem-bagher-frps.service 2>/dev/null || true ;;
         restart) systemctl restart hashem-bagher.service hashem-bagher-frps.service 2>/dev/null || true ;;
         logs) journalctl -u hashem-bagher.service -u hashem-bagher-frps.service -n 50 --no-pager ;;
-        gen-key)
-            mkdir -p /root/.ssh
-            [[ -f /root/.ssh/hashem-fwd ]] || ssh-keygen -t ed25519 -N "" -f /root/.ssh/hashem-fwd -C "hashem-ssh-carrier" >/dev/null 2>&1
-            cat /root/.ssh/hashem-fwd.pub
-            ;;
         clear-dnat)
             nft delete table inet hashem_dnat >/dev/null 2>&1 || true
             echo -e "${GREEN}[✔️] Cleared conflicting DNAT table.${NC}"
             ;;
         bundle)
-            mkdir -p /root/.ssh
-            [[ -f /root/.ssh/hashem-fwd ]] || ssh-keygen -t ed25519 -N "" -f /root/.ssh/hashem-fwd -C "hashem-ssh-carrier" >/dev/null 2>&1
-            local PUBKEY=$(cat /root/.ssh/hashem-fwd.pub)
             local MY_IP=$(get_public_ip)
-            local B64=$(printf '{"v":1,"role":"foreign","iran_pub":"%s","frp_port":55400,"ports":[443,8443,1020,1030,1040],"token":"hashem-bagher-sec","pool_count":25,"ssh_pub_key":"%s","ssh_port":22}' "$MY_IP" "$PUBKEY" | base64 | tr -d '\n\r ')
+            local B64=$(printf '{"v":1,"role":"foreign","iran_pub":"%s","frp_port":55400,"ports":[443,8443,1020,1030,1040],"token":"hashem-bagher-sec","pool_count":25,"psk":"%s","ssh_port":22}' "$MY_IP" "$BAGHER_PSK" | base64 | tr -d '\n\r ')
             echo "BAGHER:${B64}"
             ;;
         apply-bundle)
             shift
             local B64="${1#BAGHER:}"
             local DECODED=$(printf "%s" "$B64" | base64 -d 2>/dev/null || true)
-            local PUBKEY=$(echo "$DECODED" | grep -o '"ssh_pub_key":"[^"]*"' | cut -d'"' -f4)
             local FRP_PORT=$(echo "$DECODED" | grep -o '"frp_port":[0-9]*' | cut -d':' -f2)
             local POOL_COUNT=$(echo "$DECODED" | grep -o '"pool_count":[0-9]*' | cut -d':' -f2)
             FRP_PORT="${FRP_PORT:-55400}"; POOL_COUNT="${POOL_COUNT:-25}"
-            mkdir -p /root/.ssh && touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
-            echo "restrict,port-forwarding,permitopen=\"127.0.0.1:${FRP_PORT}\" $PUBKEY" >> /root/.ssh/authorized_keys
             install_frp_binaries "client" || true
             mkdir -p "${PANEL_CONFIG_DIR}/bagher"
             cat <<EOF > "${PANEL_CONFIG_DIR}/bagher/frpc.toml"
@@ -3826,24 +3820,22 @@ menu_bagher() {
         echo "  4) Stop Bagher Engine Service"
         echo "  5) Restart Bagher Engine Service"
         echo "  6) View Bagher Service Logs"
-        echo "  7) Generate Key & Show Foreign Bundle"
-        echo "  8) Clear Conflicting DNAT Rules"
+        echo "  7) Clear Conflicting DNAT Rules"
         echo "  0) Back"
         echo ""
-        read -p "Select an option [0-8]: " SF_OPT
+        read -p "Select an option [0-7]: " SF_OPT
         case "$SF_OPT" in
             1)
-                local R_IP R_PORTS R_PORT R_POOL R_MODE
+                local R_IP R_PORTS R_POOL R_MODE
                 read -p "Enter Remote Host (Foreign IP): " R_IP
-                read -p "Enter Remote SSH Port [22]: " R_PORT; R_PORT=${R_PORT:-22}
                 read -p "Enter Ports to forward [443, 8443, 1020, 1030, 1040]: " R_PORTS
                 R_PORTS=${R_PORTS:-"443, 8443, 1020, 1030, 1040"}
                 read -p "Mode (1: Bagher Hybrid Pool, 2: Direct SSH) [1]: " R_MODE
                 if [[ "$R_MODE" == "2" ]]; then
-                    cli_bagher enable --remote-host "$R_IP" --ssh-port "$R_PORT" --ports "$R_PORTS" --mode direct
+                    cli_bagher enable --remote-host "$R_IP" --ports "$R_PORTS" --mode direct
                 else
                     read -p "Enter Pool Count [25]: " R_POOL; R_POOL=${R_POOL:-25}
-                    cli_bagher enable --remote-host "$R_IP" --ssh-port "$R_PORT" --ports "$R_PORTS" --mode bagher --pool-count "$R_POOL"
+                    cli_bagher enable --remote-host "$R_IP" --ports "$R_PORTS" --mode bagher --pool-count "$R_POOL"
                 fi
                 pause_prompt ;;
             2) cli_bagher disable; pause_prompt ;;
@@ -3851,8 +3843,7 @@ menu_bagher() {
             4) cli_bagher stop; pause_prompt ;;
             5) cli_bagher restart; pause_prompt ;;
             6) cli_bagher logs; pause_prompt ;;
-            7) cli_bagher gen-key; echo ""; cli_bagher bundle; pause_prompt ;;
-            8) cli_bagher clear-dnat; pause_prompt ;;
+            7) cli_bagher clear-dnat; pause_prompt ;;
             0) return 0 ;;
         esac
     done
@@ -4080,7 +4071,7 @@ Usage (Standalone CLI Mode — No Web Panel):
   hashem status | logs | restart | remove-tunnel [--force] | uninstall [--force]
   hashem optimize | restore | tune-status | free-ram
   hashem carrier [status|mode <target>|set <target>|next|set-ports <P1> <P2>]
-  hashem bagher [status|enable|disable|start|stop|restart|logs|gen-key|bundle|apply-bundle]
+  hashem bagher [status|enable|disable|start|stop|restart|logs|bundle|apply-bundle]
   hashem cluster [status|peers|add-foreign|del-foreign|switch-foreign|set-mode|revert]
   hashem dial [status|auto|gre|public]
   hashem perf [status|enc on|off|comp on|off|tcpmux on|off|autopool on|off|apply|reset]
