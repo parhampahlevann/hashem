@@ -3366,6 +3366,45 @@ menu_carrier() {
 # ---- Bagher Engine [PRO] (No Web Dashboard) ----
 BAGHER_PSK="1234"
 
+bagher_tcp_check() {
+    local host="$1" port="$2" timeout_s="${3:-6}"
+    timeout "$timeout_s" bash -c "cat < /dev/null > /dev/tcp/${host}/${port}" >/dev/null 2>&1
+}
+
+bagher_last_error() {
+    local svc="$1"
+    journalctl -u "$svc" -n 50 --no-pager 2>/dev/null \
+        | grep -Ei 'timed out|refused|permission denied|no route to host|could not resolve|name or service not known|connection closed by|banner exchange' \
+        | tail -n 1
+}
+
+bagher_explain_error() {
+    local err="$1"
+    case "$err" in
+        *"timed out"*)
+            echo -e "  ${YELLOW}-> TCP connection never reached the remote host/port.${NC}"
+            echo -e "     Most likely: the SSH port is blocked/filtered on the path from this server"
+            echo -e "     (very common for plain port 22 on Iranian links), the remote server is down,"
+            echo -e "     or the IP/port is wrong. Run: hashem bagher check (see below)."
+            ;;
+        *"refused"*)
+            echo -e "  ${YELLOW}-> Remote host answered but is NOT listening on that port.${NC}"
+            echo -e "     Check sshd is running on the remote server and listening on the port you used."
+            ;;
+        *"Permission denied"*)
+            echo -e "  ${YELLOW}-> Reached the server, but authentication failed.${NC}"
+            echo -e "     Make sure PasswordAuthentication is enabled in sshd_config on the remote server"
+            echo -e "     and that its root/user password matches the Bagher PSK (\"${BAGHER_PSK}\")."
+            ;;
+        *"No route to host"*)
+            echo -e "  ${YELLOW}-> No network route to that IP. Double-check the remote IP is correct and online.${NC}"
+            ;;
+        *"could not resolve"*|*"Name or service not known"*)
+            echo -e "  ${YELLOW}-> Could not resolve the remote host. Double-check the address.${NC}"
+            ;;
+    esac
+}
+
 cli_bagher() {
     local SUB="${1:-status}"
     case "$SUB" in
@@ -3374,12 +3413,41 @@ cli_bagher() {
             if systemctl is-active --quiet hashem-bagher.service 2>/dev/null; then
                 echo -e "Bagher Carrier:    ${GREEN}active (running)${NC}"
             else
-                echo -e "Bagher Carrier:    ${YELLOW}inactive${NC}"
+                local B_STATE B_ERR
+                B_STATE=$(systemctl is-active hashem-bagher.service 2>/dev/null || echo "inactive")
+                echo -e "Bagher Carrier:    ${YELLOW}${B_STATE}${NC}"
+                B_ERR=$(bagher_last_error hashem-bagher.service)
+                if [[ -n "$B_ERR" ]]; then
+                    echo -e "  ${YELLOW}Last error:${NC} ${B_ERR}"
+                    bagher_explain_error "$B_ERR"
+                else
+                    echo -e "  ${YELLOW}(no recent error line found — run: journalctl -u hashem-bagher.service -n 50)${NC}"
+                fi
             fi
             if systemctl is-active --quiet hashem-bagher-frps.service 2>/dev/null; then
                 echo -e "Bagher FRP Server: ${GREEN}active (running)${NC}"
             elif systemctl is-active --quiet hashem-bagher-frpc.service 2>/dev/null; then
                 echo -e "Bagher FRP Client: ${GREEN}active (running)${NC}"
+            fi
+            ;;
+        check)
+            shift
+            local CHK_HOST="${1:-}" CHK_PORT="${2:-22}"
+            if [[ -z "$CHK_HOST" ]]; then
+                echo "Usage: hashem bagher check <remote-host> [ssh-port]"
+                return 1
+            fi
+            echo -e "${CYAN}[*] Checking ${CHK_HOST}:${CHK_PORT} reachability (TCP)...${NC}"
+            if bagher_tcp_check "$CHK_HOST" "$CHK_PORT" 6; then
+                echo -e "${GREEN}[✔️] ${CHK_HOST}:${CHK_PORT} is reachable from this server.${NC}"
+            else
+                echo -e "${RED}[!] Could not reach ${CHK_HOST}:${CHK_PORT} within 6s.${NC}"
+                echo -e "${YELLOW}    Test ping separately: ping -c 3 ${CHK_HOST}${NC}"
+                echo -e "${YELLOW}    If ping works but this still fails, port ${CHK_PORT} is almost certainly"
+                echo -e "    blocked/filtered on the way out of this server (common for plain SSH/22 on"
+                echo -e "    Iranian links) or blocked by a firewall/security-group on the remote side.${NC}"
+                echo -e "${YELLOW}    Try adding a second sshd port (e.g. 443) on the remote server and re-run"
+                echo -e "    enable with --ssh-port 443.${NC}"
             fi
             ;;
         enable)
@@ -3403,6 +3471,20 @@ cli_bagher() {
                 export DEBIAN_FRONTEND=noninteractive
                 { timeout 30 apt-get update -qq </dev/null && timeout 60 apt-get install -y -qq sshpass </dev/null; } 2>/dev/null || true
             }
+
+            echo -e "${CYAN}[*] Testing TCP reachability to ${REMOTE_HOST}:${SSH_PORT} before enabling...${NC}"
+            if bagher_tcp_check "$REMOTE_HOST" "$SSH_PORT" 6; then
+                echo -e "${GREEN}[✔️] ${REMOTE_HOST}:${SSH_PORT} is reachable.${NC}"
+            else
+                echo -e "${YELLOW}[!] Could not reach ${REMOTE_HOST}:${SSH_PORT} within 6s.${NC}"
+                echo -e "${YELLOW}    This usually means port ${SSH_PORT} is blocked/filtered between this server"
+                echo -e "    and ${REMOTE_HOST} (ISP/DPI filtering, a firewall or cloud security-group rule on"
+                echo -e "    the remote server, or the remote IP/port is simply wrong).${NC}"
+                echo -e "${YELLOW}    The service will still be installed and will keep retrying, but it will"
+                echo -e "    very likely keep failing until this is fixed. Tip: if plain port 22 is blocked,"
+                echo -e "    add a second line 'Port 443' to sshd_config on ${REMOTE_HOST}, restart sshd there,"
+                echo -e "    then re-run this with --ssh-port 443.${NC}"
+            fi
             local PORT_OPT=""
             [[ "$SSH_PORT" != "22" && -n "$SSH_PORT" ]] && PORT_OPT="-p $SSH_PORT"
             IFS=',' read -ra PORT_ARR <<< "$PORTS"
@@ -3435,10 +3517,11 @@ EOF
 [Unit]
 Description=Hashem Bagher Engine Carrier (Reverse SSH tunnel)
 After=network-online.target hashem-bagher-frps.service
+StartLimitIntervalSec=0
 
 [Service]
 Environment=SSHPASS=${BAGHER_PSK}
-ExecStart=/usr/bin/sshpass -e /usr/bin/ssh -N -o BatchMode=no -o PreferredAuthentications=password -o PubkeyAuthentication=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new -o TCPKeepAlive=yes -R 127.0.0.1:${FRP_PORT}:127.0.0.1:${FRP_PORT} ${PORT_OPT} ${USER}@${REMOTE_HOST}
+ExecStart=/usr/bin/sshpass -e /usr/bin/ssh -N -o BatchMode=no -o ConnectTimeout=15 -o PreferredAuthentications=password -o PubkeyAuthentication=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new -o TCPKeepAlive=yes -R 127.0.0.1:${FRP_PORT}:127.0.0.1:${FRP_PORT} ${PORT_OPT} ${USER}@${REMOTE_HOST}
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
@@ -3460,10 +3543,11 @@ EOF
 [Unit]
 Description=Hashem Bagher Engine Carrier (Direct SSH tunnel)
 After=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Environment=SSHPASS=${BAGHER_PSK}
-ExecStart=/usr/bin/sshpass -e /usr/bin/ssh -N -o BatchMode=no -o PreferredAuthentications=password -o PubkeyAuthentication=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new ${PORT_OPT} ${FWD_ARGS} ${USER}@${REMOTE_HOST}
+ExecStart=/usr/bin/sshpass -e /usr/bin/ssh -N -o BatchMode=no -o ConnectTimeout=15 -o PreferredAuthentications=password -o PubkeyAuthentication=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new ${PORT_OPT} ${FWD_ARGS} ${USER}@${REMOTE_HOST}
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
@@ -3821,21 +3905,23 @@ menu_bagher() {
         echo "  5) Restart Bagher Engine Service"
         echo "  6) View Bagher Service Logs"
         echo "  7) Clear Conflicting DNAT Rules"
+        echo "  8) Test Connectivity to a Remote Host:Port"
         echo "  0) Back"
         echo ""
-        read -p "Select an option [0-7]: " SF_OPT
+        read -p "Select an option [0-8]: " SF_OPT
         case "$SF_OPT" in
             1)
-                local R_IP R_PORTS R_POOL R_MODE
+                local R_IP R_PORTS R_POOL R_MODE R_SSHPORT
                 read -p "Enter Remote Host (Foreign IP): " R_IP
+                read -p "Enter Remote SSH Port [22]: " R_SSHPORT; R_SSHPORT=${R_SSHPORT:-22}
                 read -p "Enter Ports to forward [443, 8443, 1020, 1030, 1040]: " R_PORTS
                 R_PORTS=${R_PORTS:-"443, 8443, 1020, 1030, 1040"}
                 read -p "Mode (1: Bagher Hybrid Pool, 2: Direct SSH) [1]: " R_MODE
                 if [[ "$R_MODE" == "2" ]]; then
-                    cli_bagher enable --remote-host "$R_IP" --ports "$R_PORTS" --mode direct
+                    cli_bagher enable --remote-host "$R_IP" --ssh-port "$R_SSHPORT" --ports "$R_PORTS" --mode direct
                 else
                     read -p "Enter Pool Count [25]: " R_POOL; R_POOL=${R_POOL:-25}
-                    cli_bagher enable --remote-host "$R_IP" --ports "$R_PORTS" --mode bagher --pool-count "$R_POOL"
+                    cli_bagher enable --remote-host "$R_IP" --ssh-port "$R_SSHPORT" --ports "$R_PORTS" --mode bagher --pool-count "$R_POOL"
                 fi
                 pause_prompt ;;
             2) cli_bagher disable; pause_prompt ;;
@@ -3844,6 +3930,12 @@ menu_bagher() {
             5) cli_bagher restart; pause_prompt ;;
             6) cli_bagher logs; pause_prompt ;;
             7) cli_bagher clear-dnat; pause_prompt ;;
+            8)
+                local CK_HOST CK_PORT
+                read -p "Remote host/IP: " CK_HOST
+                read -p "Port [22]: " CK_PORT; CK_PORT=${CK_PORT:-22}
+                cli_bagher check "$CK_HOST" "$CK_PORT"
+                pause_prompt ;;
             0) return 0 ;;
         esac
     done
@@ -4071,7 +4163,7 @@ Usage (Standalone CLI Mode — No Web Panel):
   hashem status | logs | restart | remove-tunnel [--force] | uninstall [--force]
   hashem optimize | restore | tune-status | free-ram
   hashem carrier [status|mode <target>|set <target>|next|set-ports <P1> <P2>]
-  hashem bagher [status|enable|disable|start|stop|restart|logs|bundle|apply-bundle]
+  hashem bagher [status|enable|disable|start|stop|restart|logs|bundle|apply-bundle|check <host> [port]]
   hashem cluster [status|peers|add-foreign|del-foreign|switch-foreign|set-mode|revert]
   hashem dial [status|auto|gre|public]
   hashem perf [status|enc on|off|comp on|off|tcpmux on|off|autopool on|off|apply|reset]
