@@ -236,7 +236,7 @@ ensure_dependencies_smart() {
     if [[ ${#missing_pkgs[@]} -eq 0 ]]; then
         mkdir -p "$PANEL_CONFIG_DIR"
         touch "$DEPS_MARKER" 2>/dev/null || true
-        echo -e "${GREEN}[✔️] All system dependencies are satisfied.${NC}"
+        echo -e "${GREEN}[OK] All system dependencies are satisfied.${NC}"
         return 0
     fi
 
@@ -266,7 +266,7 @@ ensure_dependencies_smart() {
     fi
     mkdir -p "$PANEL_CONFIG_DIR"
     touch "$DEPS_MARKER" 2>/dev/null || true
-    echo -e "${GREEN}[✔️] System dependencies installed and cached.${NC}"
+    echo -e "${GREEN}[OK] System dependencies installed and cached.${NC}"
 }
 
 is_port_in_use() {
@@ -296,7 +296,6 @@ diagnose_port_process() {
 ensure_port_available() {
     local port=$1
     local purpose=${2:-"Required port"}
-    local is_bundle=${3:-0}
 
     while is_port_in_use "$port"; do
         echo -e "${YELLOW}[!] WARNING: ${purpose} ${port} is already in use by another process.${NC}"
@@ -310,11 +309,7 @@ ensure_port_available() {
         echo "  1) Retry (after stopping conflicting process)"
         echo "  2) Diagnose process"
         echo "  3) Cancel"
-        if [[ "$is_bundle" -ne 1 ]]; then
-            echo "  4) Choose another port"
-        else
-            echo "  4) Explicitly choose another port (override bundle)"
-        fi
+        echo "  4) Choose another port"
         read -p "Select option [1-4]: " P_OPT
         case "$P_OPT" in
             1) continue ;;
@@ -328,41 +323,6 @@ ensure_port_available() {
         esac
     done
     echo "$port"
-    return 0
-}
-
-cli_bundle_inspect() {
-    local BUNDLE="" SHOW_TOKEN=0
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --show-token|-s) SHOW_TOKEN=1; shift ;;
-            *) BUNDLE="$1"; shift ;;
-        esac
-    done
-    if [[ -z "$BUNDLE" ]]; then
-        read -p "Enter setup bundle (hsh1_... / bh1_... / gh1_...): " BUNDLE
-    fi
-    if ! bundle_parse "$BUNDLE"; then
-        echo -e "${RED}[!] Invalid bundle format.${NC}"
-        return 1
-    fi
-
-    local DISP_TOKEN="******************************** (Masked, pass --show-token to reveal)"
-    [[ "$SHOW_TOKEN" -eq 1 ]] && DISP_TOKEN="$B_TOKEN"
-
-    echo -e "\n${CYAN}=============================================================="
-    echo "                  HASHEM TUNNEL BUNDLE INSPECT"
-    echo -e "==============================================================${NC}"
-    echo -e "Bundle Engine:         ${GREEN}${B_ENGINE}${NC}"
-    echo -e "Iran Public IP:        ${CYAN}${B_IRAN_PUB}${NC}"
-    echo -e "Control Port:          ${CYAN}${B_FRP_PORT}${NC}"
-    echo -e "Iran GRE Internal IP:  ${CYAN}${B_IRAN_GRE:-N/A}${NC}"
-    echo -e "Foreign GRE IP:        ${CYAN}${B_FOREIGN_GRE:-N/A}${NC}"
-    echo -e "Transport:             ${CYAN}${B_TRANSPORT:-tcp}${NC}"
-    echo -e "Reverse Proxy Ports:   ${CYAN}${B_PORTS:-None (Manual configuration)}${NC}"
-    echo -e "FOU UDP Ports:         ${CYAN}${B_FOU_P1:-443}, ${B_FOU_P2:-55555}${NC}"
-    echo -e "Auth Token:            ${YELLOW}${DISP_TOKEN}${NC}"
-    echo -e "${CYAN}==============================================================${NC}\n"
     return 0
 }
 
@@ -1046,103 +1006,6 @@ except Exception:
     echo "$NEXT"
 }
 
-# ---- Setup Bundles ----
-BUNDLE_PREFIX="hsh1_"
-BUNDLE_PREFIX_BACKHAUL="bh1_"
-BUNDLE_PREFIX_GRE_BACKHAUL="gh1_"
-
-bundle_make() {
-    local IRAN_PUB=$1 FRP_PORT=$2 IRAN_GRE=$3 FOREIGN_GRE=$4 TOKEN=$5 PORTS_SP=${6:-} FOU_ARG=${7:-} FRP_TRANS=${8:-}
-    local PORTS_DASH=""
-    [[ -n "$PORTS_SP" ]] && PORTS_DASH=$(echo "$PORTS_SP" | xargs | tr ' ' '-')
-    if [[ -z "$FOU_ARG" ]]; then
-        local P1 P2
-        read -r P1 P2 <<< "$(carrier_get_fou_ports 2>/dev/null || echo '443 55555')"
-        FOU_ARG="${P1}-${P2}"
-    fi
-    local TR_SUFFIX=""
-    [[ -n "$FRP_TRANS" && "$FRP_TRANS" != "tcp" ]] && TR_SUFFIX="_tr-${FRP_TRANS}"
-    if [[ -n "$PORTS_DASH" ]]; then
-        echo "${BUNDLE_PREFIX}${IRAN_PUB}_${FRP_PORT}_${IRAN_GRE}_${FOREIGN_GRE}_${TOKEN}_${PORTS_DASH}_fou${FOU_ARG}${TR_SUFFIX}"
-    else
-        echo "${BUNDLE_PREFIX}${IRAN_PUB}_${FRP_PORT}_${IRAN_GRE}_${FOREIGN_GRE}_${TOKEN}__fou${FOU_ARG}${TR_SUFFIX}"
-    fi
-}
-
-bundle_make_backhaul() {
-    local IRAN_PUB=$1 BH_PORT=$2 TRANSPORT=${3:-tcpmux} TOKEN=$4 PORTS=${5:-}
-    local P_STR=""
-    [[ -n "$PORTS" ]] && P_STR=$(echo "$PORTS" | tr ' ' ',' | tr -s ',')
-    if [[ -n "$P_STR" ]]; then
-        echo "${BUNDLE_PREFIX_BACKHAUL}${IRAN_PUB}_${BH_PORT}_${TRANSPORT}_${TOKEN}_${P_STR}"
-    else
-        echo "${BUNDLE_PREFIX_BACKHAUL}${IRAN_PUB}_${BH_PORT}_${TRANSPORT}_${TOKEN}"
-    fi
-}
-
-bundle_make_gre_backhaul() {
-    local IRAN_PUB=$1 BH_PORT=$2 IRAN_GRE=$3 FOREIGN_GRE=$4 TRANSPORT=${5:-tcpmux} TOKEN=$6 PORTS=${7:-}
-    local P_STR=""
-    [[ -n "$PORTS" ]] && P_STR=$(echo "$PORTS" | tr ' ' ',' | tr -s ',')
-    if [[ -n "$P_STR" ]]; then
-        echo "${BUNDLE_PREFIX_GRE_BACKHAUL}${IRAN_PUB}_${BH_PORT}_${IRAN_GRE}_${FOREIGN_GRE}_${TRANSPORT}_${TOKEN}_${P_STR}"
-    else
-        echo "${BUNDLE_PREFIX_GRE_BACKHAUL}${IRAN_PUB}_${BH_PORT}_${IRAN_GRE}_${FOREIGN_GRE}_${TRANSPORT}_${TOKEN}"
-    fi
-}
-
-bundle_parse() {
-    local IN=$1
-    if [[ "$IN" == ${BUNDLE_PREFIX_BACKHAUL}* ]]; then
-        B_ENGINE="backhaul"; B_IRAN_PUB=""; B_FRP_PORT=""; B_TRANSPORT="tcpmux"; B_TOKEN=""; B_PORTS=""
-        local rest=${IN#${BUNDLE_PREFIX_BACKHAUL}} a b c d e
-        IFS=_ read -r a b c d e <<<"$rest"
-        [[ -n "$a" && -n "$b" && -n "$c" && -n "$d" ]] || return 1
-        is_valid_ip "$a" && is_valid_port "$b" || return 1
-        B_IRAN_PUB="$a"; B_FRP_PORT="$((10#$b))"; B_TRANSPORT="$c"; B_TOKEN="$d"; B_PORTS="${e:-}"
-        return 0
-    elif [[ "$IN" == ${BUNDLE_PREFIX_GRE_BACKHAUL}* ]]; then
-        B_ENGINE="gre-backhaul"; B_IRAN_PUB=""; B_FRP_PORT=""; B_IRAN_GRE=""; B_FOREIGN_GRE=""; B_TRANSPORT="tcpmux"; B_TOKEN=""; B_PORTS=""
-        local rest=${IN#${BUNDLE_PREFIX_GRE_BACKHAUL}} a b c d e f g
-        IFS=_ read -r a b c d e f g <<<"$rest"
-        [[ -n "$a" && -n "$b" && -n "$c" && -n "$d" && -n "$e" && -n "$f" ]] || return 1
-        is_valid_ip "$a" && is_valid_port "$b" && is_valid_ip "$c" && is_valid_ip "$d" || return 1
-        B_IRAN_PUB="$a"; B_FRP_PORT="$((10#$b))"; B_IRAN_GRE="$c"; B_FOREIGN_GRE="$d"; B_TRANSPORT="$e"; B_TOKEN="$f"; B_PORTS="${g:-}"
-        return 0
-    fi
-    B_ENGINE="frp"; B_IRAN_PUB=""; B_FRP_PORT=""; B_IRAN_GRE=""; B_FOREIGN_GRE=""; B_TOKEN=""; B_PORTS=""; B_TRANSPORT="tcp"; B_FOU_P1=443; B_FOU_P2=55555
-    local rest a b c d e f g h
-    [[ "$IN" == ${BUNDLE_PREFIX}* ]] || return 1
-    rest=${IN#${BUNDLE_PREFIX}}
-    IFS=_ read -r a b c d e f g h <<<"$rest"
-    [[ -n "$a" && -n "$b" && -n "$c" && -n "$d" && -n "$e" ]] || return 1
-    is_valid_ip "$a" && is_valid_port "$b" && is_valid_ip "$c" && is_valid_ip "$d" || return 1
-    local CLEANED="" p
-    if [[ -n "${f:-}" && "$f" != fou* && "$f" != tr-* ]]; then
-        for p in $(echo "$f" | tr -- '-,' '  '); do
-            is_valid_port "$p" && CLEANED="$CLEANED $((10#$p))"
-        done
-        CLEANED=$(echo "$CLEANED" | xargs)
-        [[ -n "$CLEANED" ]] || return 1
-    fi
-    local FOU_RAW=""
-    for seg in "$f" "$g" "$h"; do
-        if [[ "$seg" == tr-* ]]; then
-            B_TRANSPORT="${seg#tr-}"
-        elif [[ "$seg" == fou* ]]; then
-            FOU_RAW="$seg"
-        fi
-    done
-    if [[ -n "$FOU_RAW" ]]; then
-        local FP1 FP2
-        IFS=- read -r FP1 FP2 <<< "${FOU_RAW#fou}"
-        is_valid_port "$FP1" && B_FOU_P1=$((10#$FP1))
-        is_valid_port "$FP2" && B_FOU_P2=$((10#$FP2))
-    fi
-    B_IRAN_PUB=$a; B_FRP_PORT=$((10#$b)); B_IRAN_GRE=$c; B_FOREIGN_GRE=$d; B_TOKEN=$e; B_PORTS=$CLEANED
-    return 0
-}
-
 prompt_ip() {
     local __var=$1 __label=$2 __def=$3 __in
     while true; do
@@ -1361,7 +1224,7 @@ cli_dial() {
             if [[ "$r" == changed:* ]]; then
                 systemctl restart "$(dial_service "$(dial_env_get DIAL_KIND)")" >/dev/null 2>&1 || true
             fi
-            echo -e "${GREEN}[✔️] Dial route: ${sub} (${r#*:})${NC}"
+            echo -e "${GREEN}[OK] Dial route: ${sub} (${r#*:})${NC}"
             ;;
         *) echo "Usage: hashem dial [status|auto|gre|public]"; return 1 ;;
     esac
@@ -1442,7 +1305,7 @@ download_with_fallback() {
         for M in "${MIRRORS[@]}"; do
             rm -f "$DEST" 2>/dev/null
             if curl -fsSL --connect-timeout 6 --max-time "$TIMEOUT" "${STALL[@]}" -o "$DEST" "$M" 2>/dev/null && is_valid_download "$DEST"; then
-                echo -e "${GREEN}[✔️] Download succeeded via mirror: ${M%/*}${NC}"
+                echo -e "${GREEN}[OK] Download succeeded via mirror: ${M%/*}${NC}"
                 return 0
             fi
             rm -f "$DEST" 2>/dev/null
@@ -1492,7 +1355,7 @@ install_frp_binaries() {
     [[ -n "$FOUND_FRPC" ]] && cp -f "$FOUND_FRPC" "$INSTALL_DIR/" 2>/dev/null
     chmod +x "${INSTALL_DIR}/frps" "${INSTALL_DIR}/frpc" 2>/dev/null || true
     rm -rf "$TMP_DIR"
-    echo -e "${GREEN}[✔️] FRP installed to ${INSTALL_DIR}.${NC}"
+    echo -e "${GREEN}[OK] FRP installed to ${INSTALL_DIR}.${NC}"
 }
 
 BACKHAUL_CONFIG_DIR="/etc/backhaul"
@@ -1527,7 +1390,7 @@ install_backhaul_binaries() {
         mkdir -p "/root/backhaul-core" 2>/dev/null || true
         cp -f "${INSTALL_DIR}/backhaul" "/root/backhaul-core/backhaul_premium" 2>/dev/null || ln -sf "${INSTALL_DIR}/backhaul" "/root/backhaul-core/backhaul_premium"
         chmod +x "/root/backhaul-core/backhaul_premium" 2>/dev/null || true
-        echo -e "${GREEN}[✔️] Backhaul installed to ${INSTALL_DIR}/backhaul.${NC}"
+        echo -e "${GREEN}[OK] Backhaul installed to ${INSTALL_DIR}/backhaul.${NC}"
         return 0
     fi
     return 1
@@ -1774,7 +1637,7 @@ EOF
     iptables -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1340 >/dev/null 2>&1 || \
         iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1340
 
-    echo -e "${GREEN}[✔️] GRE Tunnel service active with IP ${CLEAN_GRE_IP} (MTU 1380, MSS 1340).${NC}"
+    echo -e "${GREEN}[OK] GRE Tunnel service active with IP ${CLEAN_GRE_IP} (MTU 1380, MSS 1340).${NC}"
 }
 
 purge_legacy_obfuscation() {
@@ -1851,7 +1714,7 @@ with open(path, "w") as f:
 '
         systemctl restart frpc
         autopool_state_set applied_pool="$EFF_POOL" last_restart="$(date +%s)"
-        echo -e "${GREEN}[✔️] frpc.toml updated & frpc restarted.${NC}"
+        echo -e "${GREEN}[OK] frpc.toml updated & frpc restarted.${NC}"
     fi
 
     if [[ "$IS_IRAN" -eq 1 ]] && command -v python3 >/dev/null 2>&1; then
@@ -1884,7 +1747,7 @@ with open(path, "w") as f:
             [[ -f "$s" ]] && systemctl restart "$(basename "$s")" >/dev/null 2>&1 || true
         done
         autopool_state_set frps_restart_needed=false
-        echo -e "${GREEN}[✔️] frps toml(s) updated & restarted.${NC}"
+        echo -e "${GREEN}[OK] frps toml(s) updated & restarted.${NC}"
     fi
 }
 
@@ -1903,26 +1766,26 @@ cli_perf() {
             ;;
         enc)
             case "${2:-}" in
-                on)  perf_set_val "proxy_encryption" "true" 1; echo -e "${GREEN}[✔️] Encryption ON.${NC}" ;;
-                off) perf_set_val "proxy_encryption" "false" 1; echo -e "${GREEN}[✔️] Encryption OFF.${NC}" ;;
+                on)  perf_set_val "proxy_encryption" "true" 1; echo -e "${GREEN}[OK] Encryption ON.${NC}" ;;
+                off) perf_set_val "proxy_encryption" "false" 1; echo -e "${GREEN}[OK] Encryption OFF.${NC}" ;;
                 *) echo "Usage: hashem perf enc on|off"; return 1 ;;
             esac ;;
         comp)
             case "${2:-}" in
-                on)  perf_set_val "proxy_compression" "true" 1; echo -e "${GREEN}[✔️] Compression ON.${NC}" ;;
-                off) perf_set_val "proxy_compression" "false" 1; echo -e "${GREEN}[✔️] Compression OFF.${NC}" ;;
+                on)  perf_set_val "proxy_compression" "true" 1; echo -e "${GREEN}[OK] Compression ON.${NC}" ;;
+                off) perf_set_val "proxy_compression" "false" 1; echo -e "${GREEN}[OK] Compression OFF.${NC}" ;;
                 *) echo "Usage: hashem perf comp on|off"; return 1 ;;
             esac ;;
         tcpmux|mux)
             case "${2:-}" in
-                on)  perf_set_val "tcp_mux" "true" 1; echo -e "${GREEN}[✔️] TCP Mux ON.${NC}" ;;
-                off) perf_set_val "tcp_mux" "false" 1; echo -e "${GREEN}[✔️] TCP Mux OFF.${NC}" ;;
+                on)  perf_set_val "tcp_mux" "true" 1; echo -e "${GREEN}[OK] TCP Mux ON.${NC}" ;;
+                off) perf_set_val "tcp_mux" "false" 1; echo -e "${GREEN}[OK] TCP Mux OFF.${NC}" ;;
                 *) echo "Usage: hashem perf tcpmux on|off"; return 1 ;;
             esac ;;
         autopool|auto-pool)
             case "${2:-status}" in
-                on)  perf_set_val "auto_pool" "true" 1; echo -e "${GREEN}[✔️] Auto Pool ON.${NC}" ;;
-                off) perf_set_val "auto_pool" "false" 1; echo -e "${GREEN}[✔️] Auto Pool OFF.${NC}" ;;
+                on)  perf_set_val "auto_pool" "true" 1; echo -e "${GREEN}[OK] Auto Pool ON.${NC}" ;;
+                off) perf_set_val "auto_pool" "false" 1; echo -e "${GREEN}[OK] Auto Pool OFF.${NC}" ;;
                 tick) autopool_tick ;;
                 status) pool_effective_values ;;
             esac ;;
@@ -2052,7 +1915,7 @@ UNIT
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
         ufw allow "${FPORT}/tcp" >/dev/null 2>&1 || true
     fi
-    echo -e "${GREEN}[✔️] Native WSS TLS front listening on :${FPORT} (-> frps :${CPORT})${NC}"
+    echo -e "${GREEN}[OK] Native WSS TLS front listening on :${FPORT} (-> frps :${CPORT})${NC}"
 }
 
 frps_wss_front_remove() {
@@ -2154,10 +2017,15 @@ EOF
     [[ "$STATUS_FRP" == "OK" ]] && echo -e "[${GREEN}OK${NC}]     FRP Server Service (frps listening on :${BIND_PORT})" || echo -e "[${RED}FAILED${NC}] FRP Server Service (${FRP_ERR})"
     echo "=============================================================="
 
-    local BUNDLE_OUT
-    BUNDLE_OUT=$(bundle_make "$IP_IRAN" "$BIND_PORT" "$LOCAL_GRE" "$PEER_GRE" "$TOKEN" "$PORTS_CLEANED" "" "$FRP_TRANSPORT")
-    echo -e "Setup Bundle:         ${CYAN}${BUNDLE_OUT}${NC}"
-    echo -e "BUNDLE:${BUNDLE_OUT}"
+    echo -e "\n${CYAN}=== Share These With The FOREIGN Server ===${NC}"
+    echo -e "IRAN Public IP:      ${CYAN}${IP_IRAN}${NC}"
+    echo -e "FRP Port:            ${CYAN}${BIND_PORT}${NC}"
+    echo -e "Auth Token:          ${YELLOW}${TOKEN}${NC}"
+    echo -e "IRAN GRE IP:         ${CYAN}${LOCAL_GRE}${NC}"
+    echo -e "FOREIGN GRE IP:      ${CYAN}${PEER_GRE}${NC}"
+    echo -e "Transport:           ${CYAN}${FRP_TRANSPORT}${NC}"
+    [[ -n "$PORTS_CLEANED" ]] && echo -e "Ports:               ${CYAN}${PORTS_CLEANED}${NC}"
+    echo -e "${CYAN}========================================================================${NC}"
 
     [[ "$STATUS_GRE" == "OK" && "$STATUS_FRP" == "OK" ]] && return 0 || return 1
 }
@@ -2297,10 +2165,13 @@ setup_backhaul_iran_server_noninteractive() {
     setup_backhaul_server_systemd "backhaul-server" "${BACKHAUL_CONFIG_DIR}/config.toml"
     sleep 2
     tune_apply >/dev/null 2>&1 || true
-    local BUNDLE_STR
-    BUNDLE_STR=$(bundle_make_backhaul "$IP_IRAN" "$BIND_PORT" "$TRANSPORT" "$TOKEN" "$PORTS")
-    echo -e "Setup Bundle:         ${CYAN}${BUNDLE_STR}${NC}"
-    echo -e "BUNDLE:${BUNDLE_STR}"
+    echo -e "\n${CYAN}=== Share These With The FOREIGN Server ===${NC}"
+    echo -e "IRAN Public IP:      ${CYAN}${IP_IRAN}${NC}"
+    echo -e "Backhaul Port:       ${CYAN}${BIND_PORT}${NC}"
+    echo -e "Auth Token:          ${YELLOW}${TOKEN}${NC}"
+    echo -e "Transport:           ${CYAN}${TRANSPORT}${NC}"
+    [[ -n "$PORTS" ]] && echo -e "Ports:               ${CYAN}${PORTS}${NC}"
+    echo -e "${CYAN}========================================================================${NC}"
 }
 
 setup_backhaul_foreign_server_noninteractive() {
@@ -2314,7 +2185,7 @@ setup_backhaul_foreign_server_noninteractive() {
     setup_backhaul_client_systemd "backhaul-client" "${BACKHAUL_CONFIG_DIR}/client.toml"
     sleep 2
     tune_apply >/dev/null 2>&1 || true
-    echo -e "${GREEN}[✔️] Backhaul Client active (${IP_IRAN}:${SERVER_PORT}).${NC}"
+    echo -e "${GREEN}[OK] Backhaul Client active (${IP_IRAN}:${SERVER_PORT}).${NC}"
 }
 
 setup_gre_backhaul_iran_server_noninteractive() {
@@ -2329,10 +2200,15 @@ setup_gre_backhaul_iran_server_noninteractive() {
     backhaul_write_server_conf "${BACKHAUL_CONFIG_DIR}/config.toml" "0.0.0.0:${BIND_PORT}" "$TRANSPORT" "$TOKEN" "$PORTS"
     setup_backhaul_server_systemd "backhaul-server" "${BACKHAUL_CONFIG_DIR}/config.toml"
     tune_apply >/dev/null 2>&1 || true
-    local BUNDLE_STR
-    BUNDLE_STR=$(bundle_make_gre_backhaul "$IP_IRAN" "$BIND_PORT" "$LOCAL_GRE" "$PEER_GRE" "$TRANSPORT" "$TOKEN" "$PORTS")
-    echo -e "Setup Bundle:         ${CYAN}${BUNDLE_STR}${NC}"
-    echo -e "BUNDLE:${BUNDLE_STR}"
+    echo -e "\n${CYAN}=== Share These With The FOREIGN Server ===${NC}"
+    echo -e "IRAN Public IP:      ${CYAN}${IP_IRAN}${NC}"
+    echo -e "Backhaul Port:       ${CYAN}${BIND_PORT}${NC}"
+    echo -e "Auth Token:          ${YELLOW}${TOKEN}${NC}"
+    echo -e "IRAN GRE IP:         ${CYAN}${LOCAL_GRE}${NC}"
+    echo -e "FOREIGN GRE IP:      ${CYAN}${PEER_GRE}${NC}"
+    echo -e "Transport:           ${CYAN}${TRANSPORT}${NC}"
+    [[ -n "$PORTS" ]] && echo -e "Ports:               ${CYAN}${PORTS}${NC}"
+    echo -e "${CYAN}========================================================================${NC}"
 }
 
 setup_gre_backhaul_foreign_server_noninteractive() {
@@ -2349,7 +2225,7 @@ setup_gre_backhaul_foreign_server_noninteractive() {
     backhaul_write_client_conf "${BACKHAUL_CONFIG_DIR}/client.toml" "${BH_DIAL}:${SERVER_PORT}" "$TRANSPORT" "$TOKEN"
     setup_backhaul_client_systemd "backhaul-client" "${BACKHAUL_CONFIG_DIR}/client.toml"
     tune_apply >/dev/null 2>&1 || true
-    echo -e "${GREEN}[✔️] GRE + Backhaul Client active (${BH_DIAL}:${SERVER_PORT}).${NC}"
+    echo -e "${GREEN}[OK] GRE + Backhaul Client active (${BH_DIAL}:${SERVER_PORT}).${NC}"
 }
 
 # ---- Multi-Peer Tunnels ----
@@ -2395,7 +2271,11 @@ peer_token() {
     PGRE=$(echo "$rec" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("peer_gre",""))')
     PTS=$(echo "$rec" | python3 -c 'import json,sys; print(" ".join(str(x) for x in json.load(sys.stdin).get("ports",[])))')
     if is_valid_ip "$LIP" && is_valid_port "$FP" && is_valid_ip "$LGRE" && is_valid_ip "$PGRE"; then
-        echo "BUNDLE:$(bundle_make "$LIP" "$FP" "$LGRE" "$PGRE" "$B_TOK" "$PTS")"
+        echo "IRAN_PUBLIC_IP:${LIP}"
+        echo "FRP_PORT:${FP}"
+        echo "IRAN_GRE_IP:${LGRE}"
+        echo "FOREIGN_GRE_IP:${PGRE}"
+        echo "PORTS:${PTS}"
     fi
 }
 
@@ -2440,7 +2320,7 @@ EOF
 }
 
 cli_add_peer() {
-    local NAME="" LOCAL_PUB="" REMOTE_PUB="" FRP_PORT="" TOKEN="" LOCAL_GRE="" PEER_GRE="" PORTS="" FORCE=0 BUNDLE=""
+    local NAME="" LOCAL_PUB="" REMOTE_PUB="" FRP_PORT="" TOKEN="" LOCAL_GRE="" PEER_GRE="" PORTS="" FORCE=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --name) NAME="$2"; shift 2 ;;
@@ -2451,20 +2331,10 @@ cli_add_peer() {
             --local-gre) LOCAL_GRE="$2"; shift 2 ;;
             --peer-gre) PEER_GRE="$2"; shift 2 ;;
             --ports) PORTS="$2"; shift 2 ;;
-            --bundle) BUNDLE="$2"; shift 2 ;;
             --force) FORCE=1; shift ;;
             *) shift ;;
         esac
     done
-    if [[ -n "$BUNDLE" ]]; then
-        bundle_parse "$BUNDLE" || return 1
-        [[ -z "$LOCAL_PUB" ]] && LOCAL_PUB=$B_IRAN_PUB
-        [[ -z "$FRP_PORT" ]] && FRP_PORT=$B_FRP_PORT
-        [[ -z "$LOCAL_GRE" ]] && LOCAL_GRE=$B_IRAN_GRE
-        [[ -z "$PEER_GRE" ]] && PEER_GRE=$B_FOREIGN_GRE
-        [[ -z "$TOKEN" ]] && TOKEN=$B_TOKEN
-        [[ -z "$PORTS" ]] && PORTS=$B_PORTS
-    fi
     FRP_PORT=${FRP_PORT:-$(gen_random_port)}
     validate_setup_common "$LOCAL_PUB" "$REMOTE_PUB" "$FRP_PORT" "$LOCAL_GRE" || return 1
     is_valid_ip "$PEER_GRE" || return 1
@@ -2503,8 +2373,15 @@ d.setdefault("peers", []).append({"id": int(iid), "name": name, "local_pub": lip
   "legacy": leg == "true"})
 json.dump(d, open(f, "w"), indent=2)
 PYEOF
-    echo -e "${GREEN}[✔️] Peer '${NAME}' (id ${ID}) added.${NC}"
-    echo -e "BUNDLE:$(bundle_make "$LOCAL_PUB" "$FRP_PORT" "$LOCAL_GRE" "$PEER_GRE" "$TOKEN" "$CLEANED")"
+    echo -e "${GREEN}[OK] Peer '${NAME}' (id ${ID}) added.${NC}"
+    echo -e "\n${CYAN}=== Share These With The FOREIGN Server ===${NC}"
+    echo -e "IRAN Public IP:      ${CYAN}${LOCAL_PUB}${NC}"
+    echo -e "FRP Port:            ${CYAN}${FRP_PORT}${NC}"
+    echo -e "Auth Token:          ${YELLOW}${TOKEN}${NC}"
+    echo -e "IRAN GRE IP:         ${CYAN}${LOCAL_GRE}${NC}"
+    echo -e "FOREIGN GRE IP:      ${CYAN}${PEER_GRE}${NC}"
+    [[ -n "$CLEANED" ]] && echo -e "Ports:               ${CYAN}${CLEANED}${NC}"
+    echo -e "${CYAN}========================================================================${NC}"
 }
 
 cli_remove_peer() {
@@ -2534,7 +2411,7 @@ cli_remove_peer() {
     fi
     PEERS_F="$PEERS_FILE" PEER_ID="$ID" python3 -c \
 'import json,os; f=os.environ["PEERS_F"]; d=json.load(open(f)); d["peers"]=[p for p in d.get("peers",[]) if p["id"]!=int(os.environ["PEER_ID"])]; json.dump(d,open(f,"w"),indent=2)' 2>/dev/null || true
-    echo -e "${GREEN}[✔️] Peer '${NAME}' (id ${ID}) removed.${NC}"
+    echo -e "${GREEN}[OK] Peer '${NAME}' (id ${ID}) removed.${NC}"
 }
 
 cli_add_backhaul_peer() {
@@ -2575,7 +2452,7 @@ cli_add_backhaul_peer() {
         backhaul_write_server_conf "$CONF_FILE" "0.0.0.0:${PORT}" "$TRANSPORT" "$TOKEN" "$PORTS"
         setup_backhaul_server_systemd "$SVC_NAME" "$CONF_FILE"
     fi
-    echo -e "${GREEN}[✔️] Backhaul Peer '${NAME}' (id ${ID}) added!${NC}"
+    echo -e "${GREEN}[OK] Backhaul Peer '${NAME}' (id ${ID}) added!${NC}"
 }
 
 cli_edit_peer() {
@@ -2617,7 +2494,7 @@ for p in d.get("peers", []):
             p["ports"] = [int(x) for x in os.environ["NEW_PORTS"].replace(",", " ").split() if x.isdigit()]
 json.dump(d, open(f, "w"), indent=2)
 PYEOF
-    echo -e "${GREEN}[✔️] Peer #${ID} updated.${NC}"
+    echo -e "${GREEN}[OK] Peer #${ID} updated.${NC}"
 }
 
 cli_edit_peer_ports() {
@@ -2647,7 +2524,7 @@ setup_iran_server() {
     prompt_ip IP_IRAN "Enter IRAN Server Public IP" "$MY_PUBLIC_IP"
     prompt_ip IP_FOREIGN "Enter FOREIGN Server Public IP" ""
     prompt_port BIND_PORT "Enter FRP Bind Port" "$(gen_random_port)"
-    BIND_PORT=$(ensure_port_available "$BIND_PORT" "FRP Bind Port" 0) || return 1
+    BIND_PORT=$(ensure_port_available "$BIND_PORT" "FRP Bind Port") || return 1
     AUTO_TOKEN=$(gen_token32)
     prompt_token TOKEN "Enter Secret Auth Token" "$AUTO_TOKEN"
     setup_iran_server_noninteractive "$IP_IRAN" "$IP_FOREIGN" "$BIND_PORT" "$TOKEN" "$IRAN_GRE_IP" "$FOREIGN_GRE_IP"
@@ -2706,31 +2583,17 @@ menu_edit_peer() {
 
 setup_foreign_server() {
     echo -e "\n${YELLOW}=== CONFIGURING FOREIGN SERVER (GRE + FRPC) ===${NC}"
-    local MY_PUBLIC_IP BUNDLE_IN SERVER_PORT TOKEN INPUT_PORTS BUNDLE_USED=0 LOCAL_GRE_SET="$FOREIGN_GRE_IP" PEER_GRE_SET="$IRAN_GRE_IP" IP_FOREIGN="" IP_IRAN=""
+    local MY_PUBLIC_IP SERVER_PORT TOKEN INPUT_PORTS LOCAL_GRE_SET="$FOREIGN_GRE_IP" PEER_GRE_SET="$IRAN_GRE_IP" IP_FOREIGN="" IP_IRAN=""
     MY_PUBLIC_IP=$(get_public_ip)
-    read -p "Enter Setup Bundle (hsh1_... / bh1_... / gh1_...) [Press Enter for manual]: " BUNDLE_IN
-    if [[ -n "$BUNDLE_IN" ]] && bundle_parse "$BUNDLE_IN"; then
-        cli_bundle_inspect "$BUNDLE_IN"
-        BUNDLE_USED=1
-        prompt_ip IP_FOREIGN "Enter FOREIGN Server Public IP" "$MY_PUBLIC_IP"
-        if [[ "$B_ENGINE" == "backhaul" ]]; then
-            setup_backhaul_foreign_server_noninteractive "$IP_FOREIGN" "$B_IRAN_PUB" "$B_FRP_PORT" "$B_TOKEN" "$B_TRANSPORT"
-            return $?
-        elif [[ "$B_ENGINE" == "gre-backhaul" ]]; then
-            setup_gre_backhaul_foreign_server_noninteractive "$IP_FOREIGN" "$B_IRAN_PUB" "$B_FRP_PORT" "$B_TOKEN" "$B_FOREIGN_GRE" "$B_IRAN_GRE" "$B_TRANSPORT"
-            return $?
-        fi
-        IP_IRAN=$B_IRAN_PUB; SERVER_PORT=$B_FRP_PORT; TOKEN=$B_TOKEN; LOCAL_GRE_SET=$B_FOREIGN_GRE; PEER_GRE_SET=$B_IRAN_GRE
-        INPUT_PORTS=$(echo "$B_PORTS" | tr ' ' ',')
-        [[ -z "$INPUT_PORTS" ]] && prompt_ports INPUT_PORTS "Enter Ports to Reverse-Tunnel"
-    fi
-    if [[ "$BUNDLE_USED" -ne 1 ]]; then
-        prompt_ip IP_FOREIGN "Enter FOREIGN Server Public IP" "$MY_PUBLIC_IP"
-        prompt_ip IP_IRAN "Enter IRAN Server Public IP" ""
-        prompt_port SERVER_PORT "Enter FRP Server Port" "$(gen_random_port)"
-        prompt_required TOKEN "Enter Secret Auth Token"
-        prompt_ports INPUT_PORTS "Enter Ports to Reverse-Tunnel"
-    fi
+    prompt_ip IP_FOREIGN "Enter FOREIGN Server Public IP" "$MY_PUBLIC_IP"
+    prompt_ip IP_IRAN "Enter IRAN Server Public IP" ""
+    prompt_port SERVER_PORT "Enter FRP Server Port (same as IRAN FRP Bind Port)" "$(gen_random_port)"
+    prompt_required TOKEN "Enter Secret Auth Token (same as IRAN server)"
+    prompt_ports INPUT_PORTS "Enter Ports to Reverse-Tunnel"
+    read -p "Local GRE IP [Default: ${LOCAL_GRE_SET}]: " _LG
+    [[ -n "$_LG" ]] && is_valid_ip "$_LG" && LOCAL_GRE_SET="$_LG"
+    read -p "Peer (IRAN) GRE IP [Default: ${PEER_GRE_SET}]: " _PG
+    [[ -n "$_PG" ]] && is_valid_ip "$_PG" && PEER_GRE_SET="$_PG"
     _setup_foreign_full "$IP_FOREIGN" "$IP_IRAN" "$SERVER_PORT" "$TOKEN" "$LOCAL_GRE_SET" "$PEER_GRE_SET" "$(echo "$INPUT_PORTS" | tr ',' ' ')"
 }
 
@@ -2740,13 +2603,13 @@ check_status() {
         ip addr show dev "$TUNNEL_NAME"
         local TARGET_PING="$IRAN_GRE_IP"
         ip addr show dev "$TUNNEL_NAME" 2>/dev/null | grep -q "$IRAN_GRE_IP" && TARGET_PING="$FOREIGN_GRE_IP"
-        ping -c 3 -W 2 "$TARGET_PING" && echo -e "${GREEN}[✔️] Ping OK.${NC}" || echo -e "${YELLOW}[!] Remote peer did not answer ping.${NC}"
+        ping -c 3 -W 2 "$TARGET_PING" && echo -e "${GREEN}[OK] Ping OK.${NC}" || echo -e "${YELLOW}[!] Remote peer did not answer ping.${NC}"
     else
         echo -e "${YELLOW}[*] Interface ${TUNNEL_NAME} not found.${NC}"
     fi
     for svc in frps backhaul-server frpc backhaul-client; do
         if systemctl is-active --quiet "$svc"; then
-            echo -e "${GREEN}[✔️] ${svc} is ACTIVE.${NC}"
+            echo -e "${GREEN}[OK] ${svc} is ACTIVE.${NC}"
             systemctl status "$svc" --no-pager -l | head -n 15
         fi
     done
@@ -2767,7 +2630,7 @@ restart_all() {
     local u
     for u in /etc/systemd/system/gre-t*.service /etc/systemd/system/gre-tunnel.service /etc/systemd/system/frps*.service /etc/systemd/system/frpc.service /etc/systemd/system/backhaul*.service; do
         [[ -f "$u" ]] || continue
-        systemctl restart "$(basename "$u")" >/dev/null 2>&1 && echo -e "${GREEN}[✔️] $(basename "$u") restarted.${NC}"
+        systemctl restart "$(basename "$u")" >/dev/null 2>&1 && echo -e "${GREEN}[OK] $(basename "$u") restarted.${NC}"
     done
 }
 
@@ -2800,8 +2663,8 @@ doctor_diagnostics() {
 }
 
 doctor_apply_fixes() { tune_apply; }
-doctor_start_server() { ensure_doctor_tools; pgrep -x iperf3 >/dev/null 2>&1 || iperf3 -s -D; echo -e "${GREEN}[✔️] iperf3 server listening on :5201.${NC}"; }
-doctor_stop_server() { pkill -f "iperf3 -s" >/dev/null 2>&1 || true; echo -e "${GREEN}[✔️] iperf3 server stopped.${NC}"; }
+doctor_start_server() { ensure_doctor_tools; pgrep -x iperf3 >/dev/null 2>&1 || iperf3 -s -D; echo -e "${GREEN}[OK] iperf3 server listening on :5201.${NC}"; }
+doctor_stop_server() { pkill -f "iperf3 -s" >/dev/null 2>&1 || true; echo -e "${GREEN}[OK] iperf3 server stopped.${NC}"; }
 
 doctor_health_check() {
     echo -e "\n${CYAN}=============================================================="
@@ -2864,7 +2727,7 @@ cli_revpath() {
         sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1 || true
         for f in /proc/sys/net/ipv4/conf/*/rp_filter; do echo 0 > "$f" 2>/dev/null || true; done
         restart_all_lite
-        echo -e "${GREEN}[✔️] Reverse path filtering relaxed (rp_filter=0) and tunnel interfaces refreshed.${NC}"
+        echo -e "${GREEN}[OK] Reverse path filtering relaxed (rp_filter=0) and tunnel interfaces refreshed.${NC}"
     fi
 }
 
@@ -2916,7 +2779,7 @@ uninstall_all_force() {
     rm -f "${INSTALL_DIR}/frps" "${INSTALL_DIR}/frpc" "${INSTALL_DIR}/backhaul" /usr/local/bin/hashem-tls-proxy.py
     rm -rf "$CONFIG_DIR" "$BACKHAUL_CONFIG_DIR" "$PANEL_CONFIG_DIR" /var/log/hashem*
     rm -f /usr/local/bin/hashem /usr/local/bin/hashem.sh /usr/local/bin/gre.sh
-    echo -e "${GREEN}[✔️] Complete uninstallation finished.${NC}"
+    echo -e "${GREEN}[OK] Complete uninstallation finished.${NC}"
 }
 
 remove_tunnel() {
@@ -2936,7 +2799,7 @@ remove_tunnel_force() {
     done
     rm -rf "$CONFIG_DIR" "$BACKHAUL_CONFIG_DIR"
     rm -f "$PEERS_FILE"
-    echo -e "${GREEN}[✔️] All tunnel components removed.${NC}"
+    echo -e "${GREEN}[OK] All tunnel components removed.${NC}"
 }
 
 # ---- Kernel & Network Optimization ----
@@ -3003,13 +2866,13 @@ EOF
     sysctl --system >/dev/null 2>&1 || true
     iptables -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1340 >/dev/null 2>&1 || \
         iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1340 >/dev/null 2>&1 || true
-    echo -e "${GREEN}[✔️] Kernel BBR, buffers, conntrack & MSS clamping applied.${NC}"
+    echo -e "${GREEN}[OK] Kernel BBR, buffers, conntrack & MSS clamping applied.${NC}"
 }
 
 tune_restore() {
     rm -f /etc/sysctl.d/99-gre-tune.conf
     sysctl --system >/dev/null 2>&1 || true
-    echo -e "${GREEN}[✔️] Kernel tuning restored to system defaults.${NC}"
+    echo -e "${GREEN}[OK] Kernel tuning restored to system defaults.${NC}"
 }
 
 tune_status() {
@@ -3108,7 +2971,7 @@ watchdog_send() {
 }
 
 watchdog_test() {
-    watchdog_send "✅ Hashem CLI Watchdog Test OK" && echo -e "${GREEN}[✔️] Telegram alert sent.${NC}" || echo -e "${RED}[!] Telegram send failed.${NC}"
+    watchdog_send "Hashem CLI Watchdog Test OK" && echo -e "${GREEN}[OK] Telegram alert sent.${NC}" || echo -e "${RED}[!] Telegram send failed.${NC}"
 }
 
 restart_all_lite() {
@@ -3165,7 +3028,7 @@ watchdog_on() {
     install_watchdog_units
     systemctl enable --now hashem-watchdog.timer >/dev/null 2>&1
     python3 -c "import json; p='$WATCHDOG_FILE'; d=json.load(open(p)); d['enabled']=True; json.dump(d,open(p,'w'),indent=2)" 2>/dev/null || true
-    echo -e "${GREEN}[✔️] Watchdog enabled.${NC}"
+    echo -e "${GREEN}[OK] Watchdog enabled.${NC}"
 }
 
 watchdog_off() {
@@ -3213,7 +3076,7 @@ menu_watchdog() {
                 read -p "Bot Token: " T_TOK
                 read -p "Chat ID: " T_CID
                 python3 -c "import json; p='$WATCHDOG_FILE'; d=json.load(open(p)); d['tg_bot_token']='$T_TOK'; d['tg_chat_id']='$T_CID'; json.dump(d,open(p,'w'),indent=2)" 2>/dev/null || true
-                echo -e "${GREEN}[✔️] Saved.${NC}"; pause_prompt ;;
+                echo -e "${GREEN}[OK] Saved.${NC}"; pause_prompt ;;
             4) watchdog_test; pause_prompt ;;
             5) backup_now; pause_prompt ;;
             6)
@@ -3242,7 +3105,7 @@ backup_now() {
     [[ ${#FILES[@]} -eq 0 ]] && { echo -e "${RED}[!] Nothing to back up.${NC}"; return 1; }
     tar -czf - "${FILES[@]}" 2>/dev/null | openssl enc -aes-256-cbc -pbkdf2 -pass file:"${PANEL_CONFIG_DIR}/backup.key" -out "$OUT_FILE"
     chmod 600 "$OUT_FILE" 2>/dev/null || true
-    echo -e "${GREEN}[✔️] Encrypted backup created: ${OUT_FILE}${NC}"
+    echo -e "${GREEN}[OK] Encrypted backup created: ${OUT_FILE}${NC}"
 }
 
 backup_restore() {
@@ -3256,7 +3119,7 @@ backup_restore() {
     tar -xzf "$TMP_D/backup.tar.gz" -C /
     systemctl daemon-reload
     restart_all
-    echo -e "${GREEN}[✔️] Backup restored and services restarted.${NC}"
+    echo -e "${GREEN}[OK] Backup restored and services restarted.${NC}"
 }
 
 cli_backup() {
@@ -3272,7 +3135,7 @@ cli_backup() {
                 --daily) python3 -c "import json; p='$WATCHDOG_FILE'; d=json.load(open(p)); d['backup_daily_at']='${2:-03:00}'; json.dump(d,open(p,'w'),indent=2)" ;;
                 --off)   python3 -c "import json; p='$WATCHDOG_FILE'; d=json.load(open(p)); d['backup_every_hours']=0; d['backup_daily_at']=''; json.dump(d,open(p,'w'),indent=2)" ;;
             esac
-            echo -e "${GREEN}[✔️] Backup schedule updated.${NC}"
+            echo -e "${GREEN}[OK] Backup schedule updated.${NC}"
             ;;
     esac
 }
@@ -3296,7 +3159,7 @@ update_all() {
     cp "$TMP_U/hashem.sh" "$HASHEM_SCRIPT" 2>/dev/null && chmod +x "$HASHEM_SCRIPT" || true
     cp "$TMP_U/hashem.sh" "$HASHEM_BIN" 2>/dev/null && chmod +x "$HASHEM_BIN" || true
     ln -sf "$HASHEM_SCRIPT" /usr/local/bin/gre.sh 2>/dev/null || true
-    echo -e "${GREEN}[✔️] Hashem CLI script updated successfully (Web Panel remains disabled).${NC}"
+    echo -e "${GREEN}[OK] Hashem CLI script updated successfully (Web Panel remains disabled).${NC}"
 }
 
 # ---- Carrier CLI & Menu ----
@@ -3317,19 +3180,19 @@ cli_carrier() {
         mode|set-mode)
             carrier_set_mode "${2:-direct}"
             carrier_apply "${2:-direct}"
-            echo -e "${GREEN}[✔️] Carrier mode set and applied: ${2:-direct}${NC}"
+            echo -e "${GREEN}[OK] Carrier mode set and applied: ${2:-direct}${NC}"
             ;;
         set|set-active|apply)
             carrier_apply "${2:-direct}"
-            echo -e "${GREEN}[✔️] Active carrier switched to: ${2:-direct}${NC}"
+            echo -e "${GREEN}[OK] Active carrier switched to: ${2:-direct}${NC}"
             ;;
         next|cycle)
-            echo -e "${GREEN}[✔️] Cycled carrier to: $(carrier_cycle_next)${NC}"
+            echo -e "${GREEN}[OK] Cycled carrier to: $(carrier_cycle_next)${NC}"
             ;;
         set-ports)
             carrier_set_fou_ports "${2:-443}" "${3:-55555}"
             carrier_init_kernel
-            echo -e "${GREEN}[✔️] FOU ports updated.${NC}"
+            echo -e "${GREEN}[OK] FOU ports updated.${NC}"
             ;;
         init|kernel-init)
             carrier_init_kernel
@@ -3444,7 +3307,7 @@ WantedBy=multi-user.target
 EOF
                 systemctl daemon-reload
                 systemctl enable --now hashem-bagher-frps.service hashem-bagher.service
-                echo -e "${GREEN}[✔️] Bagher Engine [PRO] started.${NC}"
+                echo -e "${GREEN}[OK] Bagher Engine [PRO] started.${NC}"
                 echo -e "\n${YELLOW}=== Foreign authorized_keys Entry ===${NC}"
                 echo "restrict,port-forwarding,permitlisten=\"127.0.0.1:${FRP_PORT}\" ${PUBKEY}"
             else
@@ -3469,7 +3332,7 @@ WantedBy=multi-user.target
 EOF
                 systemctl daemon-reload
                 systemctl enable --now hashem-bagher.service
-                echo -e "${GREEN}[✔️] Direct SSH Forward started.${NC}"
+                echo -e "${GREEN}[OK] Direct SSH Forward started.${NC}"
             fi
             ;;
         disable)
@@ -3487,7 +3350,7 @@ EOF
             ;;
         clear-dnat)
             nft delete table inet hashem_dnat >/dev/null 2>&1 || true
-            echo -e "${GREEN}[✔️] Cleared conflicting DNAT table.${NC}"
+            echo -e "${GREEN}[OK] Cleared conflicting DNAT table.${NC}"
             ;;
         bundle)
             mkdir -p /root/.ssh
@@ -3547,7 +3410,7 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 EOF
             systemctl daemon-reload && systemctl enable --now hashem-bagher-frpc.service
-            echo -e "${GREEN}[✔️] Bagher client started (No web dashboard listening).${NC}"
+            echo -e "${GREEN}[OK] Bagher client started (No web dashboard listening).${NC}"
             ;;
     esac
 }
@@ -3602,7 +3465,7 @@ if not d.get("active_node"):
     d["active_node"] = name
 json.dump(d, open(f, "w"), indent=2)
 PY
-            echo -e "${GREEN}[✔️] Added foreign server '${NAME}' (${IP}) to cluster.${NC}"
+            echo -e "${GREEN}[OK] Added foreign server '${NAME}' (${IP}) to cluster.${NC}"
             ;;
         del-foreign)
             local TARGET="$1"
@@ -3614,7 +3477,7 @@ nodes = d.get("nodes", [])
 d["nodes"] = [n for idx, n in enumerate(nodes, 1) if n.get("name") != t and str(idx) != t]
 json.dump(d, open(f, "w"), indent=2)
 PY
-            echo -e "${GREEN}[✔️] Removed '${TARGET}' from cluster.${NC}"
+            echo -e "${GREEN}[OK] Removed '${TARGET}' from cluster.${NC}"
             ;;
         switch-foreign)
             local TARGET="$1"
@@ -3638,18 +3501,18 @@ PY
             if ip link show "$TUNNEL_NAME" >/dev/null 2>&1; then
                 ip tunnel change "$TUNNEL_NAME" remote "$NEW_IP" >/dev/null 2>&1 || true
             fi
-            echo -e "${GREEN}[✔️] Switched active foreign endpoint to ${TARGET} (${NEW_IP}).${NC}"
+            echo -e "${GREEN}[OK] Switched active foreign endpoint to ${TARGET} (${NEW_IP}).${NC}"
             ;;
         set-mode)
             local MODE="${1:-wrr}"
             python3 -c "import json; f='$CLUSTER_FILE'; d=json.load(open(f)); d['mode']='$MODE'; json.dump(d,open(f,'w'),indent=2)"
-            echo -e "${GREEN}[✔️] Cluster balancing strategy set to: ${MODE}.${NC}"
+            echo -e "${GREEN}[OK] Cluster balancing strategy set to: ${MODE}.${NC}"
             ;;
         revert)
             iptables -t nat -S PREROUTING 2>/dev/null | grep -E 'HASHEM-CLUSTER-FAILOVER|hashem_cluster' | while read -r line; do
                 iptables -t nat -D ${line#-A } 2>/dev/null || true
             done
-            echo -e "${GREEN}[✔️] Cluster failover rules cleared.${NC}"
+            echo -e "${GREEN}[OK] Cluster failover rules cleared.${NC}"
             ;;
         *)
             echo "Usage: hashem cluster {status|peers|add-foreign|del-foreign|switch-foreign|set-mode|revert}"
@@ -3741,9 +3604,9 @@ menu_quick_setup() {
     while true; do
         clear
         show_banner
-        echo -e "${CYAN}=== 🚀 QUICK TUNNEL SETUP ===${NC}"
-        echo "  1) Setup Iran Server (Create Key & Bundle)"
-        echo "  2) Setup Foreign Server via Bundle"
+        echo -e "${CYAN}=== QUICK TUNNEL SETUP ===${NC}"
+        echo "  1) Setup Iran Server (Create Key & Share Connection Info)"
+        echo "  2) Setup Foreign Server (Manual Entry)"
         echo "  3) Setup Backhaul Tunnel (TCPMux, ICMP, TUN)"
         echo "  0) Back to Main Menu"
         echo ""
@@ -3763,9 +3626,9 @@ menu_tunnel() {
         show_banner
         echo -e "${CYAN}--- [ TUNNEL MANAGEMENT ] ---${NC}"
         echo "  1) Setup IRAN Tunnel (GRE + FRPS / Backhaul Server)"
-        echo "  2) Setup FOREIGN Tunnel (via Bundle string or Manual)"
+        echo "  2) Setup FOREIGN Tunnel (Manual Entry)"
         echo "  3) Add Peer Tunnel (Multi-foreign servers on Iran)"
-        echo "  4) List Peers & Show Setup Bundle"
+        echo "  4) List Peers & Show Connection Info"
         echo "  5) Edit Peer Tunnel Configuration (Ports, IP, Carrier, Name)"
         echo "  6) Remove a Specific Peer Tunnel"
         echo "  7) Tunnel Health Status & GRE Ping Test"
@@ -3798,8 +3661,12 @@ menu_tunnel() {
                 BIND_PORT=$(awk -F'=' '/bindPort/{gsub(/[ "]/,"",$2); print $2}' /etc/frp/frps.toml 2>/dev/null)
                 TOKEN=$(awk -F'=' '/auth\.token/{gsub(/[ "]/,"",$2); print $2}' /etc/frp/frps.toml 2>/dev/null)
                 if [[ -n "$IP_IRAN" && -n "$BIND_PORT" && -n "$TOKEN" ]]; then
-                    echo -e "\n${GREEN}=== Iran Server Setup Bundle ===${NC}"
-                    echo -e "BUNDLE: ${CYAN}$(bundle_make "$IP_IRAN" "$BIND_PORT" "$IRAN_GRE_IP" "$FOREIGN_GRE_IP" "$TOKEN")${NC}\n"
+                    echo -e "\n${GREEN}=== Iran Server Connection Info ===${NC}"
+                    echo -e "IRAN Public IP:  ${CYAN}${IP_IRAN}${NC}"
+                    echo -e "FRP Port:        ${CYAN}${BIND_PORT}${NC}"
+                    echo -e "Auth Token:      ${CYAN}${TOKEN}${NC}"
+                    echo -e "IRAN GRE IP:     ${CYAN}${IRAN_GRE_IP}${NC}"
+                    echo -e "FOREIGN GRE IP:  ${CYAN}${FOREIGN_GRE_IP}${NC}\n"
                 fi
                 pause_prompt ;;
             5) menu_edit_peer; pause_prompt ;;
@@ -3862,7 +3729,7 @@ menu_cluster() {
     while true; do
         clear
         show_banner
-        echo -e "${CYAN}=== ⚖️ MULTI-FOREIGN CLUSTER & LOAD BALANCER ===${NC}"
+        echo -e "${CYAN}=== MULTI-FOREIGN CLUSTER & LOAD BALANCER ===${NC}"
         echo ""
         cli_cluster status
         echo ""
@@ -4002,7 +3869,7 @@ menu_maintenance() {
             1) backup_configs "pre_update"; update_all; pause_prompt ;;
             2) install_frp_binaries "all" || true; install_backhaul_binaries || true; pause_prompt ;;
             3) rm -f "${PANEL_CONFIG_DIR}/.deps_installed"; ensure_dependencies_smart; pause_prompt ;;
-            4) carrier_init_kernel; echo -e "${GREEN}[✔️] Kernel modules ip_gre & fou checked.${NC}"; pause_prompt ;;
+            4) carrier_init_kernel; echo -e "${GREEN}[OK] Kernel modules ip_gre & fou checked.${NC}"; pause_prompt ;;
             5) echo "Hashem Script Version: $HASHEM_VERSION"; tune_status; pause_prompt ;;
             0) return 0 ;;
         esac
@@ -4034,16 +3901,16 @@ menu_loop() {
         show_banner
         echo ""
         echo -e "${BOLD}MAIN MENU (Standalone CLI — Web Panel Disabled)${NC}"
-        echo "  1) 🚀 Quick Tunnel Setup (Iran / Foreign / Backhaul)"
-        echo "  2) 🌐 Tunnel & Multi-Peer Management"
-        echo "  3) ⚖️ Multi-Foreign Cluster & Load Balancer"
-        echo "  4) 🥷 Bagher Pro Stealth Hybrid Engine"
-        echo "  5) ⚡ Auto-Pool & FRP Performance Tuning"
-        echo "  6) 🛡️ Carrier Switch, Watchdog, BBR & RAM Optimization"
-        echo "  7) 🩺 Diagnostics, Doctor, Speed & Stress Test"
-        echo "  8) 📦 Encrypted Backup & System Maintenance"
-        echo "  9) 🗑️ Uninstall Hashem"
-        echo "  0) 🚪 Exit"
+        echo "  1) Quick Tunnel Setup (Iran / Foreign / Backhaul)"
+        echo "  2) Tunnel & Multi-Peer Management"
+        echo "  3) Multi-Foreign Cluster & Load Balancer"
+        echo "  4) Bagher Pro Stealth Hybrid Engine"
+        echo "  5) Auto-Pool & FRP Performance Tuning"
+        echo "  6) Carrier Switch, Watchdog, BBR & RAM Optimization"
+        echo "  7) Diagnostics, Doctor, Speed & Stress Test"
+        echo "  8) Encrypted Backup & System Maintenance"
+        echo "  9) Uninstall Hashem"
+        echo "  0) Exit"
         echo ""
         read -p "Select an option [0-9]: " MAIN_OPT
         case "$MAIN_OPT" in
@@ -4071,11 +3938,11 @@ usage_cli() {
 Usage (Standalone CLI Mode — No Web Panel):
   hashem                                       # Open interactive terminal management menu
   hashem setup-iran    --local-pub IP --remote-pub IP [--frp-port N] [--local-gre IP] [--peer-gre IP] [--token T] [--force]
-  hashem setup-foreign --bundle hsh1_... | bh1_... | gh1_... [--ports "443, 2083"] [--force]
+  hashem setup-foreign --remote-pub IP --frp-port N --token T --ports "443, 2083" [--local-gre IP] [--peer-gre IP] [--force]
   hashem setup-backhaul-iran    --remote-pub IP --port P [--transport tcpmux] [--token K] [--ports "..."]
-  hashem setup-backhaul-foreign --bundle bh1_... | --remote-pub IP --port P --token K [--transport tcpmux]
+  hashem setup-backhaul-foreign --remote-pub IP --port P --token K [--transport tcpmux]
   hashem setup-gre-backhaul-iran    --remote-pub IP --port P [--transport tcpmux] [--ports "..."]
-  hashem setup-gre-backhaul-foreign --bundle gh1_... | --remote-pub IP --port P --token K
+  hashem setup-gre-backhaul-foreign --remote-pub IP --port P --token K [--transport tcpmux]
   hashem add-peer | remove-peer --id N | edit-peer --id N ... | peer-list | peer-token --id N
   hashem status | logs | restart | remove-tunnel [--force] | uninstall [--force]
   hashem optimize | restore | tune-status | free-ram
@@ -4120,7 +3987,7 @@ cli_setup_iran() {
 }
 
 cli_setup_foreign() {
-    local LOCAL_PUB="" REMOTE_PUB="" FRP_PORT="" LOCAL_GRE="$FOREIGN_GRE_IP" PEER_GRE="$IRAN_GRE_IP" TOKEN="" PORTS="" FORCE=0 BUNDLE=""
+    local LOCAL_PUB="" REMOTE_PUB="" FRP_PORT="" LOCAL_GRE="$FOREIGN_GRE_IP" PEER_GRE="$IRAN_GRE_IP" TOKEN="" PORTS="" FORCE=0
     local RELAY_IP="" PROXY_PROTOCOL="off" FRP_TRANSPORT="tcp" FRP_ENCRYPTION="off" FRP_COMPRESSION="off"
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -4131,7 +3998,6 @@ cli_setup_foreign() {
             --peer-gre) PEER_GRE="$2"; shift 2 ;;
             --token) TOKEN="$2"; shift 2 ;;
             --ports) PORTS="$2"; shift 2 ;;
-            --bundle) BUNDLE="$2"; shift 2 ;;
             --relay-ip) RELAY_IP="$2"; shift 2 ;;
             --proxy-protocol) PROXY_PROTOCOL="$2"; shift 2 ;;
             --frp-transport) FRP_TRANSPORT="$2"; shift 2 ;;
@@ -4142,14 +4008,6 @@ cli_setup_foreign() {
             *) shift ;;
         esac
     done
-    if [[ -n "$BUNDLE" ]]; then
-        bundle_parse "$BUNDLE" || return 1
-        [[ "$B_ENGINE" == "backhaul" ]] && { cli_setup_backhaul_foreign --bundle "$BUNDLE" --force; return $?; }
-        [[ "$B_ENGINE" == "gre-backhaul" ]] && { cli_setup_gre_backhaul_foreign --bundle "$BUNDLE" --force; return $?; }
-        TOKEN=$B_TOKEN; REMOTE_PUB=$B_IRAN_PUB; FRP_PORT=$B_FRP_PORT; LOCAL_GRE=$B_FOREIGN_GRE; PEER_GRE=$B_IRAN_GRE
-        [[ -z "$PORTS" && -n "$B_PORTS" ]] && PORTS=$B_PORTS
-        [[ -n "$B_TRANSPORT" && "$FRP_TRANSPORT" == "tcp" ]] && FRP_TRANSPORT="$B_TRANSPORT"
-    fi
     LOCAL_PUB=${LOCAL_PUB:-$(get_public_ip)}
     FRP_PORT=${FRP_PORT:-$(gen_random_port)}
     validate_setup_common "$LOCAL_PUB" "$REMOTE_PUB" "$FRP_PORT" "$LOCAL_GRE" || return 1
@@ -4180,7 +4038,7 @@ cli_setup_backhaul_iran() {
 }
 
 cli_setup_backhaul_foreign() {
-    local LOCAL_PUB="" REMOTE_PUB="" PORT="" TRANSPORT="tcpmux" TOKEN="" BUNDLE=""
+    local LOCAL_PUB="" REMOTE_PUB="" PORT="" TRANSPORT="tcpmux" TOKEN=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --local-pub) LOCAL_PUB="$2"; shift 2 ;;
@@ -4188,14 +4046,9 @@ cli_setup_backhaul_foreign() {
             --port) PORT="$2"; shift 2 ;;
             --transport) TRANSPORT="$2"; shift 2 ;;
             --token) TOKEN="$2"; shift 2 ;;
-            --bundle) BUNDLE="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
-    if [[ -n "$BUNDLE" ]]; then
-        bundle_parse "$BUNDLE" || return 1
-        REMOTE_PUB=$B_IRAN_PUB; PORT=$B_FRP_PORT; TRANSPORT=$B_TRANSPORT; TOKEN=$B_TOKEN
-    fi
     LOCAL_PUB=${LOCAL_PUB:-$(get_public_ip)}
     setup_backhaul_foreign_server_noninteractive "$LOCAL_PUB" "$REMOTE_PUB" "$PORT" "$TOKEN" "$TRANSPORT"
 }
@@ -4222,7 +4075,7 @@ cli_setup_gre_backhaul_iran() {
 }
 
 cli_setup_gre_backhaul_foreign() {
-    local LOCAL_PUB="" REMOTE_PUB="" PORT="" LOCAL_GRE="$FOREIGN_GRE_IP" PEER_GRE="$IRAN_GRE_IP" TRANSPORT="tcpmux" TOKEN="" BUNDLE=""
+    local LOCAL_PUB="" REMOTE_PUB="" PORT="" LOCAL_GRE="$FOREIGN_GRE_IP" PEER_GRE="$IRAN_GRE_IP" TRANSPORT="tcpmux" TOKEN=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --local-pub) LOCAL_PUB="$2"; shift 2 ;;
@@ -4232,14 +4085,9 @@ cli_setup_gre_backhaul_foreign() {
             --peer-gre) PEER_GRE="$2"; shift 2 ;;
             --transport) TRANSPORT="$2"; shift 2 ;;
             --token) TOKEN="$2"; shift 2 ;;
-            --bundle) BUNDLE="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
-    if [[ -n "$BUNDLE" ]]; then
-        bundle_parse "$BUNDLE" || return 1
-        TOKEN=$B_TOKEN; REMOTE_PUB=$B_IRAN_PUB; PORT=$B_FRP_PORT; LOCAL_GRE=$B_FOREIGN_GRE; PEER_GRE=$B_IRAN_GRE; TRANSPORT=$B_TRANSPORT
-    fi
     LOCAL_PUB=${LOCAL_PUB:-$(get_public_ip)}
     setup_gre_backhaul_foreign_server_noninteractive "$LOCAL_PUB" "$REMOTE_PUB" "$PORT" "$TOKEN" "$LOCAL_GRE" "$PEER_GRE" "$TRANSPORT"
 }
@@ -4248,14 +4096,6 @@ cli_setup_gre_backhaul_foreign() {
 if [[ $# -gt 0 ]]; then
     case "$1" in
         -h|--help|help) usage_cli; exit 0 ;;
-        bundle)
-            shift
-            case "${1:-}" in
-                inspect) shift; cli_bundle_inspect "$@" ;;
-                *) echo "Usage: hashem bundle inspect <bundle> [--show-token]"; exit 1 ;;
-            esac
-            exit $?
-            ;;
     esac
 
     check_root
