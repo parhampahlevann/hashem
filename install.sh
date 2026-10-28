@@ -8,7 +8,7 @@
 #             Native Cluster/Load-Balancer, Watchdog, Encrypted Backup, Doctor
 # ==============================================================================
 
-HASHEM_VERSION="2.5.0-cli"
+HASHEM_VERSION="2.5.1-cli"
 HASHEM_BIN="/usr/local/bin/hashem"
 HASHEM_SCRIPT="/usr/local/bin/hashem.sh"
 HASHEM_URL_BASE="https://raw.githubusercontent.com/pdnczone/hashem-panel/main"
@@ -216,7 +216,7 @@ wait_for_package_manager_lock() {
 ensure_dependencies_smart() {
     local DEPS_MARKER="${PANEL_CONFIG_DIR}/.deps_installed"
     if [[ -f "$DEPS_MARKER" ]] && command -v ip >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 && \
-       command -v tar >/dev/null 2>&1 && command -v iptables >/dev/null 2>&1 && \
+       command -v tar >/dev/null 2>&1 && command -v gzip >/dev/null 2>&1 && command -v iptables >/dev/null 2>&1 && \
        command -v systemctl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && \
        command -v openssl >/dev/null 2>&1; then
         return 0
@@ -226,6 +226,7 @@ ensure_dependencies_smart() {
     command -v ip >/dev/null 2>&1 || missing_pkgs+=("iproute2")
     command -v curl >/dev/null 2>&1 || missing_pkgs+=("curl")
     command -v tar >/dev/null 2>&1 || missing_pkgs+=("tar")
+    command -v gzip >/dev/null 2>&1 || missing_pkgs+=("gzip")
     command -v iptables >/dev/null 2>&1 || missing_pkgs+=("iptables")
     command -v systemctl >/dev/null 2>&1 || missing_pkgs+=("systemd")
     command -v python3 >/dev/null 2>&1 || missing_pkgs+=("python3")
@@ -348,15 +349,15 @@ perf_get_tcpmux() {
         return 0
     fi
     if [[ -f "$PERF_FILE" ]] && command -v python3 >/dev/null 2>&1; then
-        python3 -c '
-import json
+        python3 - "$PERF_FILE" <<'PY' 2>/dev/null && return 0
+import json, sys
 try:
-    with open("'"$PERF_FILE"'") as f:
+    with open(sys.argv[1]) as f:
         d = json.load(f)
     print(("1" if d["tcp_mux"] else "0") if "tcp_mux" in d else "")
 except Exception:
     print("")
-' 2>/dev/null && return 0
+PY
     fi
     echo ""
 }
@@ -388,14 +389,14 @@ perf_get_enc() {
         return 0
     fi
     if [[ -f "$PERF_FILE" ]] && command -v python3 >/dev/null 2>&1; then
-        python3 -c '
-import json
+        python3 - "$PERF_FILE" <<'PY' 2>/dev/null && return 0
+import json, sys
 try:
-    with open("'"$PERF_FILE"'") as f:
+    with open(sys.argv[1]) as f:
         print(1 if json.load(f).get("proxy_encryption", False) else 0)
 except Exception:
     print(0)
-' 2>/dev/null && return 0
+PY
     fi
     echo 0
 }
@@ -406,14 +407,14 @@ perf_get_comp() {
         return 0
     fi
     if [[ -f "$PERF_FILE" ]] && command -v python3 >/dev/null 2>&1; then
-        python3 -c '
-import json
+        python3 - "$PERF_FILE" <<'PY' 2>/dev/null && return 0
+import json, sys
 try:
-    with open("'"$PERF_FILE"'") as f:
+    with open(sys.argv[1]) as f:
         print(1 if json.load(f).get("proxy_compression", False) else 0)
 except Exception:
     print(0)
-' 2>/dev/null && return 0
+PY
     fi
     echo 0
 }
@@ -422,12 +423,10 @@ perf_set_val() {
     local key="$1" val="$2" is_raw="${3:-0}"
     init_perf_json
     if command -v python3 >/dev/null 2>&1; then
-        python3 -c '
-import json
-path = "'"$PERF_FILE"'"
-key = "'"$key"'"
-raw = '"$is_raw"'
-val_str = """'"$val"'"""
+        python3 - "$PERF_FILE" "$key" "$val" "$is_raw" <<'PY'
+import json, sys
+path, key, val_str, raw_str = sys.argv[1:5]
+raw = (raw_str == "1")
 try:
     with open(path, "r") as f:
         d = json.load(f)
@@ -447,16 +446,16 @@ else:
     d[key] = val_str
 with open(path, "w") as f:
     json.dump(d, f, indent=2)
-'
+PY
         chmod 600 "$PERF_FILE" 2>/dev/null || true
     fi
 }
 
 perf_prune_legacy_keys() {
     [[ -f "$PERF_FILE" ]] && command -v python3 >/dev/null 2>&1 || return 0
-    python3 -c '
-import json
-path = "'"$PERF_FILE"'"
+    python3 - "$PERF_FILE" <<'PY' 2>/dev/null || true
+import json, sys
+path = sys.argv[1]
 try:
     with open(path) as f:
         d = json.load(f)
@@ -466,7 +465,7 @@ try:
         json.dump(d, f, indent=2)
 except Exception:
     pass
-' 2>/dev/null || true
+PY
 }
 
 # ---- Auto Pool ----
@@ -476,14 +475,14 @@ perf_get_auto_pool() {
         return 0
     fi
     if [[ -f "$PERF_FILE" ]] && command -v python3 >/dev/null 2>&1; then
-        python3 -c '
-import json
+        python3 - "$PERF_FILE" <<'PY' 2>/dev/null && return 0
+import json, sys
 try:
-    with open("'"$PERF_FILE"'") as f:
+    with open(sys.argv[1]) as f:
         print(1 if json.load(f).get("auto_pool", True) else 0)
 except Exception:
     print(1)
-' 2>/dev/null && return 0
+PY
     fi
     echo 1
 }
@@ -491,14 +490,15 @@ except Exception:
 perf_get_int() {
     local key="$1" def="$2"
     [[ -f "$PERF_FILE" ]] && command -v python3 >/dev/null 2>&1 || { echo "$def"; return 0; }
-    python3 -c '
-import json
+    python3 - "$PERF_FILE" "$key" "$def" <<'PY' 2>/dev/null || echo "$def"
+import json, sys
+path, key, def_val = sys.argv[1:4]
 try:
-    with open("'"$PERF_FILE"'") as f:
-        print(int(json.load(f).get("'"$key"'", '"$def"')))
+    with open(path) as f:
+        print(int(json.load(f).get(key, int(def_val))))
 except Exception:
-    print('"$def"')
-' 2>/dev/null || echo "$def"
+    print(def_val)
+PY
 }
 
 pool_clamp() {
@@ -796,39 +796,39 @@ EOF
 
 carrier_get_mode() {
     init_carrier_json
-    python3 -c '
-import json
+    python3 - "$CARRIER_FILE" <<'PY' 2>/dev/null || echo "direct"
+import json, sys
 try:
-    with open("'"$CARRIER_FILE"'") as f:
+    with open(sys.argv[1]) as f:
         print(json.load(f).get("mode", "direct"))
 except Exception:
     print("direct")
-' 2>/dev/null || echo "direct"
+PY
 }
 
 carrier_get_active() {
     init_carrier_json
-    python3 -c '
-import json
+    python3 - "$CARRIER_FILE" <<'PY' 2>/dev/null || echo "direct"
+import json, sys
 try:
-    with open("'"$CARRIER_FILE"'") as f:
+    with open(sys.argv[1]) as f:
         print(json.load(f).get("active_carrier", "direct"))
 except Exception:
     print("direct")
-' 2>/dev/null || echo "direct"
+PY
 }
 
 carrier_get_fou_ports() {
     init_carrier_json
-    python3 -c '
-import json
+    python3 - "$CARRIER_FILE" <<'PY' 2>/dev/null || echo "443 55555"
+import json, sys
 try:
-    with open("'"$CARRIER_FILE"'") as f:
+    with open(sys.argv[1]) as f:
         d = json.load(f)
-        print(f"{d.get(\"fou_port1\", 443)} {d.get(\"fou_port2\", 55555)}")
+        print(f"{d.get('fou_port1', 443)} {d.get('fou_port2', 55555)}")
 except Exception:
     print("443 55555")
-' 2>/dev/null || echo "443 55555"
+PY
 }
 
 carrier_set_mode() {
@@ -836,30 +836,30 @@ carrier_set_mode() {
     [[ "$M" == "auto" ]] && M="direct"
     [[ "$M" == "direct" || "$M" == fou:* || "$M" == wss* ]] || return 1
     init_carrier_json
-    python3 -c '
+    python3 - "$CARRIER_FILE" "$M" <<'PY' 2>/dev/null || true
 import json, os, sys
-p = "'"$CARRIER_FILE"'"
+p, mode = sys.argv[1], sys.argv[2]
 try:
     with open(p) as f:
         d = json.load(f)
 except Exception:
     d = {}
-d["mode"] = sys.argv[1]
+d["mode"] = mode
 with open(p + ".tmp", "w") as f:
     json.dump(d, f, indent=2)
 os.replace(p + ".tmp", p)
 os.chmod(p, 0o600)
-' "$M" 2>/dev/null || true
+PY
 }
 
 carrier_set_fou_ports() {
     local P1=$1 P2=$2
     is_valid_port "$P1" && is_valid_port "$P2" || return 1
     init_carrier_json
-    python3 -c '
+    python3 - "$CARRIER_FILE" "$P1" "$P2" <<'PY' 2>/dev/null || true
 import json, os, sys
-p = "'"$CARRIER_FILE"'"
-p1, p2 = int(sys.argv[1]), int(sys.argv[2])
+p = sys.argv[1]
+p1, p2 = int(sys.argv[2]), int(sys.argv[3])
 try:
     with open(p) as f:
         d = json.load(f)
@@ -873,7 +873,7 @@ with open(p + ".tmp", "w") as f:
     json.dump(d, f, indent=2)
 os.replace(p + ".tmp", p)
 os.chmod(p, 0o600)
-' "$P1" "$P2" 2>/dev/null || true
+PY
 }
 
 carrier_init_kernel() {
@@ -944,22 +944,22 @@ carrier_apply() {
         fi
     done
 
-    python3 -c '
+    python3 - "$CARRIER_FILE" "$TARGET" <<'PY' 2>/dev/null || true
 import json, os, sys, time
-p = "'"$CARRIER_FILE"'"
+p, target = sys.argv[1], sys.argv[2]
 try:
     with open(p) as f:
         d = json.load(f)
 except Exception:
     d = {}
-d["active_carrier"] = sys.argv[1]
+d["active_carrier"] = target
 d["last_switch"] = time.strftime("%Y-%m-%d %H:%M:%S")
 d["switch_count"] = int(d.get("switch_count", 0)) + 1
 with open(p + ".tmp", "w") as f:
     json.dump(d, f, indent=2)
 os.replace(p + ".tmp", p)
 os.chmod(p, 0o600)
-' "$TARGET" 2>/dev/null || true
+PY
     return 0
 }
 
@@ -967,11 +967,11 @@ carrier_apply_active() {
     local IFNAME="${1:-}"
     local ACT=""
     if [[ -n "$IFNAME" && -f "$PEERS_FILE" ]]; then
-        ACT=$(python3 -c '
+        ACT=$(python3 - "$PEERS_FILE" "$IFNAME" <<'PY' 2>/dev/null || true
 import json, sys
-ifname = sys.argv[1]
+peers_file, ifname = sys.argv[1], sys.argv[2]
 try:
-    with open("'"$PEERS_FILE"'") as f:
+    with open(peers_file) as f:
         d = json.load(f)
     for p in d.get("peers", []):
         if p.get("gre_if") == ifname and p.get("carrier"):
@@ -979,7 +979,8 @@ try:
             sys.exit(0)
 except Exception:
     pass
-' "$IFNAME" 2>/dev/null || true)
+PY
+)
     fi
     [[ -z "$ACT" ]] && ACT=$(carrier_get_active)
     carrier_apply "$ACT" "$IFNAME"
@@ -988,9 +989,9 @@ except Exception:
 carrier_cycle_next() {
     init_carrier_json
     local NEXT
-    NEXT=$(python3 -c '
-import json
-path = "'"$CARRIER_FILE"'"
+    NEXT=$(python3 - "$CARRIER_FILE" <<'PY' 2>/dev/null || echo "direct"
+import json, sys
+path = sys.argv[1]
 try:
     with open(path) as f:
         d = json.load(f)
@@ -1001,7 +1002,8 @@ try:
     print(cands[idx] if cands else "direct")
 except Exception:
     print("direct")
-' 2>/dev/null || echo "direct")
+PY
+)
     carrier_apply "$NEXT" >/dev/null 2>&1
     echo "$NEXT"
 }
@@ -1071,7 +1073,7 @@ validate_setup_common() {
     local ok=1
     is_valid_ip "$1" || { echo -e "${RED}[!] Invalid local public IP: '$1'${NC}"; ok=0; }
     is_valid_ip "$2" || { echo -e "${RED}[!] Invalid remote public IP: '$2'${NC}"; ok=0; }
-    is_valid_port "$3" || { echo -e "${RED}[!] Invalid FRP port: '$3'${NC}"; ok=0; }
+    is_valid_port "$3" || { echo -e "${RED}[!] Invalid FRP/Tunnel port: '$3'${NC}"; ok=0; }
     is_valid_ip "$4" || { echo -e "${RED}[!] Invalid local GRE IP: '$4'${NC}"; ok=0; }
     return $((1 - ok))
 }
@@ -1079,7 +1081,7 @@ validate_setup_common() {
 tunnel_present() {
     ip link show "$TUNNEL_NAME" >/dev/null 2>&1 && return 0
     ip tunnel show 2>/dev/null | grep -q "$TUNNEL_NAME" && return 0
-    [[ -f "${CONFIG_DIR}/frps.toml" || -f "${CONFIG_DIR}/frpc.toml" ]] && return 0
+    [[ -f "${CONFIG_DIR}/frps.toml" || -f "${CONFIG_DIR}/frpc.toml" || -f "/etc/backhaul/config.toml" || -f "/etc/backhaul/client.toml" ]] && return 0
     return 1
 }
 
@@ -1241,11 +1243,24 @@ check_root() {
 detect_arch() {
     ARCH=$(uname -m)
     case "$ARCH" in
-        x86_64) FRP_ARCH="amd64" ;;
+        x86_64|amd64) FRP_ARCH="amd64" ;;
         aarch64|arm64) FRP_ARCH="arm64" ;;
-        armv7l|armhf) FRP_ARCH="arm" ;;
+        armv7l|armv6l|armhf|arm) FRP_ARCH="arm" ;;
         *) echo -e "${RED}[!] Unsupported architecture: $ARCH${NC}"; exit 1 ;;
     esac
+}
+
+is_valid_elf_bin() {
+    local bin="$1"
+    [[ -f "$bin" && -s "$bin" ]] || return 1
+    local magic
+    magic=$(head -c 4 "$bin" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    [[ "$magic" == "7f454c46" ]] || return 1
+    chmod +x "$bin" 2>/dev/null || true
+    if "$bin" -v >/dev/null 2>&1 || "$bin" --version >/dev/null 2>&1 || "$bin" -h >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
 }
 
 get_latest_frp_version() {
@@ -1316,15 +1331,15 @@ download_with_fallback() {
 
 install_frp_binaries() {
     local ROLE="${1:-all}"
-    [[ "$ROLE" == "server" && -x "${INSTALL_DIR}/frps" ]] && return 0
-    [[ "$ROLE" == "client" && -x "${INSTALL_DIR}/frpc" ]] && return 0
-    [[ -x "${INSTALL_DIR}/frps" && -x "${INSTALL_DIR}/frpc" ]] && return 0
+    if [[ "$ROLE" == "server" ]] && is_valid_elf_bin "${INSTALL_DIR}/frps"; then return 0; fi
+    if [[ "$ROLE" == "client" ]] && is_valid_elf_bin "${INSTALL_DIR}/frpc"; then return 0; fi
+    if is_valid_elf_bin "${INSTALL_DIR}/frps" && is_valid_elf_bin "${INSTALL_DIR}/frpc"; then return 0; fi
 
     detect_arch
     get_latest_frp_version
     echo -e "${CYAN}[*] Downloading FRP v${FRP_VERSION} (${FRP_ARCH})...${NC}"
 
-    mkdir -p "$CONFIG_DIR"
+    mkdir -p "$CONFIG_DIR" "$INSTALL_DIR"
     local TMP_DIR TAR_FILE MIRROR_REPO DOWNLOAD_URL
     TMP_DIR=$(mktemp -d)
     TAR_FILE="frp_${FRP_VERSION}_linux_${FRP_ARCH}.tar.gz"
@@ -1332,13 +1347,15 @@ install_frp_binaries() {
     DOWNLOAD_URL="https://github.com/${MIRROR_REPO}/releases/download/v${FRP_VERSION}/${TAR_FILE}"
 
     if ! download_with_fallback "${TMP_DIR}/${TAR_FILE}" "$DOWNLOAD_URL" 45; then
-        local FALLBACK_VER="0.61.1"
-        local FALLBACK_TAR="frp_${FALLBACK_VER}_linux_${FRP_ARCH}.tar.gz"
-        if ! download_with_fallback "${TMP_DIR}/${TAR_FILE}" "https://github.com/${MIRROR_REPO}/releases/download/v${FALLBACK_VER}/${FALLBACK_TAR}" 45; then
-            if ! download_with_fallback "${TMP_DIR}/${TAR_FILE}" "https://github.com/fatedier/frp/releases/download/v${FALLBACK_VER}/${FALLBACK_TAR}" 45; then
-                echo -e "${RED}[!] Failed to download FRP binaries.${NC}"
-                rm -rf "$TMP_DIR"
-                return 1
+        if ! download_with_fallback "${TMP_DIR}/${TAR_FILE}" "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/${TAR_FILE}" 45; then
+            local FALLBACK_VER="0.61.1"
+            local FALLBACK_TAR="frp_${FALLBACK_VER}_linux_${FRP_ARCH}.tar.gz"
+            if ! download_with_fallback "${TMP_DIR}/${TAR_FILE}" "https://github.com/${MIRROR_REPO}/releases/download/v${FALLBACK_VER}/${FALLBACK_TAR}" 45; then
+                if ! download_with_fallback "${TMP_DIR}/${TAR_FILE}" "https://github.com/fatedier/frp/releases/download/v${FALLBACK_VER}/${FALLBACK_TAR}" 45; then
+                    echo -e "${RED}[!] Failed to download FRP binaries.${NC}"
+                    rm -rf "$TMP_DIR"
+                    return 1
+                fi
             fi
         fi
     fi
@@ -1351,8 +1368,8 @@ install_frp_binaries() {
     local FOUND_FRPS FOUND_FRPC
     FOUND_FRPS=$(find "$TMP_DIR" -type f -name "frps" 2>/dev/null | head -1)
     FOUND_FRPC=$(find "$TMP_DIR" -type f -name "frpc" 2>/dev/null | head -1)
-    [[ -n "$FOUND_FRPS" ]] && cp -f "$FOUND_FRPS" "$INSTALL_DIR/" 2>/dev/null
-    [[ -n "$FOUND_FRPC" ]] && cp -f "$FOUND_FRPC" "$INSTALL_DIR/" 2>/dev/null
+    [[ -n "$FOUND_FRPS" ]] && cp -f "$FOUND_FRPS" "$INSTALL_DIR/frps" 2>/dev/null
+    [[ -n "$FOUND_FRPC" ]] && cp -f "$FOUND_FRPC" "$INSTALL_DIR/frpc" 2>/dev/null
     chmod +x "${INSTALL_DIR}/frps" "${INSTALL_DIR}/frpc" 2>/dev/null || true
     rm -rf "$TMP_DIR"
     echo -e "${GREEN}[OK] FRP installed to ${INSTALL_DIR}.${NC}"
@@ -1361,38 +1378,82 @@ install_frp_binaries() {
 BACKHAUL_CONFIG_DIR="/etc/backhaul"
 DEFAULT_BACKHAUL_VERSION="v0.7.2"
 
-install_backhaul_binaries() {
-    [[ -x "${INSTALL_DIR}/backhaul" ]] && return 0
-    detect_arch
-    local BH_ARCH="$FRP_ARCH" BH_VER="$DEFAULT_BACKHAUL_VERSION"
-    echo -e "${CYAN}[*] Downloading Backhaul ${BH_VER} (${BH_ARCH})...${NC}"
+sync_backhaul_core_paths() {
+    local src="${INSTALL_DIR}/backhaul"
+    [[ -f "$src" ]] || return 1
+    chmod +x "$src" 2>/dev/null || true
+    mkdir -p "/root/backhaul-core" "$BACKHAUL_CONFIG_DIR" 2>/dev/null || true
+    cp -f "$src" "/root/backhaul-core/backhaul_premium" 2>/dev/null || ln -sf "$src" "/root/backhaul-core/backhaul_premium" 2>/dev/null || true
+    cp -f "$src" "/root/backhaul-core/backhaul" 2>/dev/null || ln -sf "$src" "/root/backhaul-core/backhaul" 2>/dev/null || true
+    chmod +x "/root/backhaul-core/backhaul_premium" "/root/backhaul-core/backhaul" 2>/dev/null || true
+    return 0
+}
 
-    mkdir -p "$BACKHAUL_CONFIG_DIR"
+install_backhaul_binaries() {
+    local FORCE_REINSTALL="${1:-0}"
+    if [[ "$FORCE_REINSTALL" != "1" ]] && is_valid_elf_bin "${INSTALL_DIR}/backhaul"; then
+        sync_backhaul_core_paths
+        return 0
+    fi
+
+    # Remove any broken/non-ELF binary before fresh download
+    rm -f "${INSTALL_DIR}/backhaul" 2>/dev/null || true
+
+    detect_arch
+    local BH_ARCH="$FRP_ARCH"
+    local BH_VER="${BACKHAUL_VERSION:-$DEFAULT_BACKHAUL_VERSION}"
+    [[ "$BH_VER" == v* ]] || BH_VER="v${BH_VER}"
+
+    echo -e "${CYAN}[*] Downloading Backhaul ${BH_VER} (${BH_ARCH}) from Musixal/Backhaul...${NC}"
+
+    mkdir -p "$BACKHAUL_CONFIG_DIR" "$INSTALL_DIR"
     local TMP_DIR TAR_FILE DOWNLOAD_URL
     TMP_DIR=$(mktemp -d)
     TAR_FILE="backhaul_linux_${BH_ARCH}.tar.gz"
     DOWNLOAD_URL="https://github.com/Musixal/Backhaul/releases/download/${BH_VER}/${TAR_FILE}"
 
-    if ! download_with_fallback "${TMP_DIR}/${TAR_FILE}" "$DOWNLOAD_URL" 45; then
-        echo -e "${RED}[!] Failed to download Backhaul.${NC}"
+    if ! download_with_fallback "${TMP_DIR}/${TAR_FILE}" "$DOWNLOAD_URL" 60; then
+        echo -e "${RED}[!] Failed to download Backhaul archive from ${DOWNLOAD_URL}.${NC}"
         rm -rf "$TMP_DIR"
         return 1
     fi
 
-    tar -xzf "${TMP_DIR}/${TAR_FILE}" -C "$TMP_DIR" 2>/dev/null || { rm -rf "$TMP_DIR"; return 1; }
-    local FOUND
+    if ! tar -xzf "${TMP_DIR}/${TAR_FILE}" -C "$TMP_DIR" 2>/dev/null; then
+        echo -e "${RED}[!] Failed to extract Backhaul archive (${TAR_FILE}).${NC}"
+        rm -rf "$TMP_DIR"
+        return 1
+    fi
+
+    local FOUND="" cand
     FOUND=$(find "$TMP_DIR" -type f -name "backhaul" 2>/dev/null | head -n 1)
-    [[ -n "$FOUND" ]] && cp "$FOUND" "$INSTALL_DIR/" 2>/dev/null
+    if [[ -z "$FOUND" ]]; then
+        for cand in $(find "$TMP_DIR" -maxdepth 2 -type f ! -name "*.tar.gz" ! -name "*.tgz" ! -name "*.md" ! -name "LICENSE*" 2>/dev/null); do
+            if is_valid_elf_bin "$cand"; then
+                FOUND="$cand"
+                break
+            fi
+        done
+    fi
+
+    if [[ -z "$FOUND" ]] || ! is_valid_elf_bin "$FOUND"; then
+        echo -e "${RED}[!] Extracted Backhaul binary is invalid or incompatible with architecture (${ARCH}).${NC}"
+        rm -rf "$TMP_DIR"
+        return 1
+    fi
+
+    cp -f "$FOUND" "${INSTALL_DIR}/backhaul" 2>/dev/null
     chmod +x "${INSTALL_DIR}/backhaul" 2>/dev/null
     rm -rf "$TMP_DIR"
 
-    if [[ -x "${INSTALL_DIR}/backhaul" ]]; then
-        mkdir -p "/root/backhaul-core" 2>/dev/null || true
-        cp -f "${INSTALL_DIR}/backhaul" "/root/backhaul-core/backhaul_premium" 2>/dev/null || ln -sf "${INSTALL_DIR}/backhaul" "/root/backhaul-core/backhaul_premium"
-        chmod +x "/root/backhaul-core/backhaul_premium" 2>/dev/null || true
-        echo -e "${GREEN}[OK] Backhaul installed to ${INSTALL_DIR}/backhaul.${NC}"
+    if is_valid_elf_bin "${INSTALL_DIR}/backhaul"; then
+        sync_backhaul_core_paths
+        local ver_out
+        ver_out=$("${INSTALL_DIR}/backhaul" -v 2>/dev/null | head -n1 || echo "${BH_VER}")
+        echo -e "${GREEN}[OK] Backhaul (${ver_out}) installed and verified at ${INSTALL_DIR}/backhaul.${NC}"
         return 0
     fi
+
+    echo -e "${RED}[!] Backhaul binary verification failed after installation.${NC}"
     return 1
 }
 
@@ -1418,7 +1479,7 @@ backhaul_is_v2() {
 backhaul_write_server_conf_v1() {
     local CONF_FILE="$1" BIND_ADDR="$2" TRANSPORT="${3:-tcpmux}" TOKEN="$4" PORTS_LIST="$5"
     mkdir -p "$(dirname "$CONF_FILE")"
-    [[ "$TRANSPORT" == "wss" || "$TRANSPORT" == "wssmux" ]] && backhaul_ensure_tls
+    [[ "$TRANSPORT" == "wss" || "$TRANSPORT" == "wssmux" || "$TRANSPORT" == "tls" ]] && backhaul_ensure_tls
     cat <<EOF > "$CONF_FILE"
 [server]
 bind_addr = "${BIND_ADDR}"
@@ -1433,7 +1494,7 @@ web_port = 0
 sniffer_log = ""
 log_level = "info"
 EOF
-    if [[ "$TRANSPORT" == "wss" || "$TRANSPORT" == "wssmux" ]]; then
+    if [[ "$TRANSPORT" == "wss" || "$TRANSPORT" == "wssmux" || "$TRANSPORT" == "tls" ]]; then
         cat <<EOF >> "$CONF_FILE"
 tls_cert = "${BACKHAUL_CONFIG_DIR}/server.crt"
 tls_key = "${BACKHAUL_CONFIG_DIR}/server.key"
@@ -1441,7 +1502,7 @@ EOF
     fi
     echo "ports = [" >> "$CONF_FILE"
     local FIRST=1
-    IFS=',' read -ra ADDR <<< "$PORTS_LIST"
+    IFS=',' read -ra ADDR <<< "$(echo "$PORTS_LIST" | tr ' ' ',')"
     for p in "${ADDR[@]}"; do
         p=$(echo "$p" | xargs)
         [[ -z "$p" ]] && continue
@@ -1473,18 +1534,18 @@ EOF
 backhaul_write_server_conf_v2() {
     local CONF_FILE="$1" BIND_ADDR="$2" TRANSPORT="$3" TOKEN="$4" PORTS_LIST="$5"
     mkdir -p "$(dirname "$CONF_FILE")"
-    [[ "$TRANSPORT" == "wss" || "$TRANSPORT" == "wssmux" ]] && backhaul_ensure_tls
+    [[ "$TRANSPORT" == "wss" || "$TRANSPORT" == "wssmux" || "$TRANSPORT" == "tls" ]] && backhaul_ensure_tls
     {
         printf '[listener]\nbind_addr = "%s"\n\n' "$BIND_ADDR"
         printf '[transport]\ntype = "%s"\nnodelay = true\nkeepalive_period = 75\n\n' "$TRANSPORT"
         printf '[security]\ntoken = "%s"\n\n' "$TOKEN"
         [[ "$TRANSPORT" == *mux ]] && printf '[mux]\nmux_version = 1\n\n'
-        if [[ "$TRANSPORT" == "wss" || "$TRANSPORT" == "wssmux" ]]; then
+        if [[ "$TRANSPORT" == "wss" || "$TRANSPORT" == "wssmux" || "$TRANSPORT" == "tls" ]]; then
             printf '[tls]\ntls_cert = "%s/server.crt"\ntls_key = "%s/server.key"\n\n' "$BACKHAUL_CONFIG_DIR" "$BACKHAUL_CONFIG_DIR"
         fi
         printf '[logging]\nlog_level = "info"\n\n[ports]\nmapping = [\n'
         local p
-        IFS=',' read -ra _ADDR <<< "$PORTS_LIST"
+        IFS=',' read -ra _ADDR <<< "$(echo "$PORTS_LIST" | tr ' ' ',')"
         for p in "${_ADDR[@]}"; do
             p="$(echo "$p" | xargs)"
             [[ -z "$p" ]] && continue
@@ -1502,7 +1563,7 @@ backhaul_write_client_conf_v2() {
         printf '[transport]\ntype = "%s"\nconnection_pool = 8\nnodelay = true\nkeepalive_period = 75\n\n' "$TRANSPORT"
         printf '[security]\ntoken = "%s"\n\n' "$TOKEN"
         [[ "$TRANSPORT" == *mux ]] && printf '[mux]\nmux_version = 1\n\n'
-        [[ "$TRANSPORT" == "wss" || "$TRANSPORT" == "wssmux" ]] && printf '[tls]\nsni = "%s"\n\n' "${REMOTE_ADDR%%:*}"
+        [[ "$TRANSPORT" == "wss" || "$TRANSPORT" == "wssmux" || "$TRANSPORT" == "tls" ]] && printf '[tls]\nsni = "%s"\n\n' "${REMOTE_ADDR%%:*}"
         printf '[logging]\nlog_level = "info"\n'
     } > "$CONF_FILE"
 }
@@ -1537,6 +1598,7 @@ CPUWeight=100
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
+    systemctl reset-failed "${SVC_NAME}.service" >/dev/null 2>&1 || true
     systemctl enable "${SVC_NAME}.service" >/dev/null 2>&1 || true
     systemctl restart "${SVC_NAME}.service"
 }
@@ -1563,6 +1625,7 @@ CPUWeight=100
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
+    systemctl reset-failed "${SVC_NAME}.service" >/dev/null 2>&1 || true
     systemctl enable "${SVC_NAME}.service" >/dev/null 2>&1 || true
     systemctl restart "${SVC_NAME}.service"
 }
@@ -1670,12 +1733,13 @@ perf_apply() {
     fi
 
     if [[ "$IS_FOREIGN" -eq 1 ]] && command -v python3 >/dev/null 2>&1; then
-        python3 -c '
-path = "'"${CONFIG_DIR}/frpc.toml"'"
-enc = ("'"$EFF_ENC"'".strip() in ("1", "true", "True"))
-comp = ("'"$EFF_COMP"'".strip() in ("1", "true", "True"))
-mux_raw = "'"$EFF_MUX"'".strip()
-pool_cnt = "'"$EFF_POOL"'".strip()
+        python3 - "${CONFIG_DIR}/frpc.toml" "$EFF_ENC" "$EFF_COMP" "$EFF_MUX" "$EFF_POOL" <<'PY'
+import sys
+path, enc_s, comp_s, mux_raw, pool_cnt = sys.argv[1:6]
+enc = enc_s.strip() in ("1", "true", "True")
+comp = comp_s.strip() in ("1", "true", "True")
+mux_raw = mux_raw.strip()
+pool_cnt = pool_cnt.strip()
 with open(path, "r") as f:
     lines = f.read().splitlines()
 sections, current = [], []
@@ -1711,7 +1775,7 @@ for i, sec in enumerate(sections):
         out_sections.append(new_sec)
 with open(path, "w") as f:
     f.write("\n".join("\n".join(s) for s in out_sections).strip() + "\n")
-'
+PY
         systemctl restart frpc
         autopool_state_set applied_pool="$EFF_POOL" last_restart="$(date +%s)"
         echo -e "${GREEN}[OK] frpc.toml updated & frpc restarted.${NC}"
@@ -1720,10 +1784,11 @@ with open(path, "w") as f:
     if [[ "$IS_IRAN" -eq 1 ]] && command -v python3 >/dev/null 2>&1; then
         for TOML_FILE in "${CONFIG_DIR}"/frps*.toml; do
             [[ -f "$TOML_FILE" ]] || continue
-            python3 -c '
-path = "'"$TOML_FILE"'"
-mux_raw = "'"$EFF_MUX"'".strip()
-max_pool = "'"$EFF_MAXPOOL"'".strip()
+            python3 - "$TOML_FILE" "$EFF_MUX" "$EFF_MAXPOOL" <<'PY'
+import sys
+path, mux_raw, max_pool = sys.argv[1:4]
+mux_raw = mux_raw.strip()
+max_pool = max_pool.strip()
 with open(path, "r") as f:
     lines = f.read().splitlines()
 new_lines = []
@@ -1740,7 +1805,7 @@ if mux_raw in ("0", "1"):
 new_lines.append("transport.maxPoolCount = " + max_pool)
 with open(path, "w") as f:
     f.write("\n".join(new_lines).strip() + "\n")
-'
+PY
         done
         systemctl restart frps >/dev/null 2>&1 || true
         for s in /etc/systemd/system/frps-*.service; do
@@ -2052,7 +2117,7 @@ _setup_foreign_full() {
     echo -e "${CYAN}[*] Testing GRE internal ping to Iran (${PEER_GRE})...${NC}"
     ping -c 3 -W 2 "$PEER_GRE" >/dev/null 2>&1 || STATUS_PING="WARN"
 
-    install_frp_binaries "client"
+    install_frp_binaries "client" || STATUS_FRP="FAILED"
     local EFF_POOL _MAXPOOL
     read -r EFF_POOL _MAXPOOL <<< "$(pool_effective_values)"
     local EFF_SERVER_PORT="${SERVER_PORT}"
@@ -2159,8 +2224,8 @@ setup_backhaul_iran_server_noninteractive() {
     backup_configs "pre_setup_backhaul_iran"
     ensure_dependencies_smart
     install_backhaul_binaries || return 1
-    backhaul_ensure_tls "$TRANSPORT"
     mkdir -p "${BACKHAUL_CONFIG_DIR}"
+    backhaul_ensure_tls "$TRANSPORT"
     backhaul_write_server_conf "${BACKHAUL_CONFIG_DIR}/config.toml" "0.0.0.0:${BIND_PORT}" "$TRANSPORT" "$TOKEN" "$PORTS"
     setup_backhaul_server_systemd "backhaul-server" "${BACKHAUL_CONFIG_DIR}/config.toml"
     sleep 2
@@ -2179,8 +2244,8 @@ setup_backhaul_foreign_server_noninteractive() {
     backup_configs "pre_setup_backhaul_foreign"
     ensure_dependencies_smart
     install_backhaul_binaries || return 1
-    backhaul_ensure_tls "$TRANSPORT"
     mkdir -p "${BACKHAUL_CONFIG_DIR}"
+    backhaul_ensure_tls "$TRANSPORT"
     backhaul_write_client_conf "${BACKHAUL_CONFIG_DIR}/client.toml" "${IP_IRAN}:${SERVER_PORT}" "$TRANSPORT" "$TOKEN"
     setup_backhaul_client_systemd "backhaul-client" "${BACKHAUL_CONFIG_DIR}/client.toml"
     sleep 2
@@ -2195,8 +2260,8 @@ setup_gre_backhaul_iran_server_noninteractive() {
     ensure_dependencies_smart
     setup_gre_systemd "$IP_IRAN" "$IP_FOREIGN" "$LOCAL_GRE" "$PEER_GRE" || return 1
     install_backhaul_binaries || return 1
-    backhaul_ensure_tls "$TRANSPORT"
     mkdir -p "${BACKHAUL_CONFIG_DIR}"
+    backhaul_ensure_tls "$TRANSPORT"
     backhaul_write_server_conf "${BACKHAUL_CONFIG_DIR}/config.toml" "0.0.0.0:${BIND_PORT}" "$TRANSPORT" "$TOKEN" "$PORTS"
     setup_backhaul_server_systemd "backhaul-server" "${BACKHAUL_CONFIG_DIR}/config.toml"
     tune_apply >/dev/null 2>&1 || true
@@ -2218,6 +2283,7 @@ setup_gre_backhaul_foreign_server_noninteractive() {
     ensure_dependencies_smart
     setup_gre_systemd "$IP_FOREIGN" "$IP_IRAN" "$LOCAL_GRE" "$PEER_GRE" || return 1
     install_backhaul_binaries || return 1
+    mkdir -p "${BACKHAUL_CONFIG_DIR}"
     backhaul_ensure_tls "$TRANSPORT"
     local BH_DIAL
     BH_DIAL=$(dial_pick "${FRP_DIAL:-auto}" "$PEER_GRE" "$IP_IRAN" "$SERVER_PORT")
@@ -2263,8 +2329,7 @@ peer_token() {
     rec=$(peer_get "$ID")
     [[ -n "$rec" ]] || { echo -e "${RED}[!] No peer with id $ID.${NC}"; return 1; }
     echo "$rec" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
-    local B_TOK LIP FP LGRE PGRE PTS
-    B_TOK=$(echo "$rec" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+    local LIP FP LGRE PGRE PTS
     LIP=$(echo "$rec" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("local_pub",""))')
     FP=$(echo "$rec" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("frp_port",""))')
     LGRE=$(echo "$rec" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("local_gre",""))')
@@ -2437,21 +2502,44 @@ cli_add_backhaul_peer() {
     peer_init; peer_require_py || return 1
     local ID
     ID=$(peer_next_id)
+    [[ "$ID" -ge 1 ]] || { echo -e "${RED}[!] Peer table full.${NC}"; return 1; }
     [[ -z "$NAME" ]] && NAME="peer-${ID}"
     install_backhaul_binaries || return 1
     backhaul_ensure_tls "$TRANSPORT"
 
     local GRE_IF="none" SVC_NAME="backhaul-server-${ID}" CONF_FILE="/etc/backhaul/server-${ID}.toml" ENGINE="backhaul"
     if [[ "$NO_GRE" -eq 1 ]]; then
+        LOCAL_GRE="${LOCAL_GRE:-0.0.0.0}"
+        PEER_GRE="${PEER_GRE:-0.0.0.0}"
         backhaul_write_server_conf "$CONF_FILE" "0.0.0.0:${PORT}" "$TRANSPORT" "$TOKEN" "$PORTS"
         setup_backhaul_server_systemd "$SVC_NAME" "$CONF_FILE"
     else
         ENGINE="gre-backhaul"
         GRE_IF="gre-t${ID}"
+        LOCAL_GRE="${LOCAL_GRE:-10.1${ID}.0.2}"
+        PEER_GRE="${PEER_GRE:-10.1${ID}.0.1}"
         setup_gre_iface "$GRE_IF" "$LOCAL_PUB" "$REMOTE_PUB" "$LOCAL_GRE" "$PEER_GRE"
         backhaul_write_server_conf "$CONF_FILE" "0.0.0.0:${PORT}" "$TRANSPORT" "$TOKEN" "$PORTS"
         setup_backhaul_server_systemd "$SVC_NAME" "$CONF_FILE"
     fi
+
+    local CLEANED="" p
+    for p in $(echo "$PORTS" | tr ',' ' '); do is_valid_port "$p" && CLEANED="$CLEANED $((10#$p))"; done
+    CLEANED=$(echo "$CLEANED" | xargs)
+    local PORTS_JSON
+    PORTS_JSON=$(echo "$CLEANED" | python3 -c 'import json,sys; print(json.dumps([int(x) for x in sys.stdin.read().split()]))')
+    PEERS_F="$PEERS_FILE" python3 - "$ID" "$NAME" "$LOCAL_PUB" "${REMOTE_PUB:-0.0.0.0}" "$PORT" "$TOKEN" "$LOCAL_GRE" "$PEER_GRE" "$PORTS_JSON" "$GRE_IF" "$SVC_NAME" "$ENGINE" <<'PYEOF'
+import json, os, sys
+f = os.environ["PEERS_F"]
+iid, name, lip, rip, fport, tok, lgre, pgre, pjson, gif, svc, eng = sys.argv[1:]
+d = json.load(open(f))
+d.setdefault("peers", []).append({"id": int(iid), "name": name, "local_pub": lip,
+  "remote_pub": rip, "frp_port": int(fport), "token": tok, "local_gre": lgre,
+  "peer_gre": pgre, "ports": json.loads(pjson), "gre_if": gif, "frps_svc": svc,
+  "engine": eng, "legacy": False})
+json.dump(d, open(f, "w"), indent=2)
+PYEOF
+
     echo -e "${GREEN}[OK] Backhaul Peer '${NAME}' (id ${ID}) added!${NC}"
 }
 
@@ -2474,12 +2562,12 @@ cli_edit_peer() {
     [[ -n "$rec" ]] || return 1
     local CUR_GIF
     CUR_GIF=$(echo "$rec" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("gre_if",""))')
-    if [[ -n "$REMOTE_PUB" ]] && is_valid_ip "$REMOTE_PUB"; then
+    if [[ -n "$REMOTE_PUB" ]] && is_valid_ip "$REMOTE_PUB" && [[ -n "$CUR_GIF" && "$CUR_GIF" != "none" ]]; then
         ip tunnel change "$CUR_GIF" remote "$REMOTE_PUB" >/dev/null 2>&1 || true
         sed -i -E "s/remote [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/remote ${REMOTE_PUB}/g" "/etc/systemd/system/${CUR_GIF}.service" 2>/dev/null || true
         systemctl daemon-reload && systemctl restart "${CUR_GIF}.service" >/dev/null 2>&1 || true
     fi
-    [[ -n "$CARRIER" ]] && carrier_apply "$CARRIER" "$CUR_GIF"
+    [[ -n "$CARRIER" && -n "$CUR_GIF" && "$CUR_GIF" != "none" ]] && carrier_apply "$CARRIER" "$CUR_GIF"
     PEERS_F="$PEERS_FILE" PEER_ID="$ID" NEW_NAME="$NAME" NEW_REMOTE="$REMOTE_PUB" NEW_CARRIER="$CARRIER" NEW_PORTS="$PORTS" python3 <<'PYEOF'
 import json, os
 f = os.environ["PEERS_F"]
@@ -2511,9 +2599,10 @@ if not peers:
     raise SystemExit(0)
 tun = subprocess.run(["ip", "tunnel", "show"], capture_output=True, text=True).stdout
 for p in sorted(peers, key=lambda x: x["id"]):
-    gre = "up" if p.get("gre_if", "") in tun else "down"
+    gif = p.get("gre_if", "")
+    gre = "none" if gif == "none" else ("up" if gif in tun else "down")
     frp = subprocess.run(["systemctl", "is-active", p.get("frps_svc", "")], capture_output=True, text=True).stdout.strip()
-    print(f"#{p['id']} {p['name']}: {p['remote_pub']} (GRE {p['local_gre']} <-> {p['peer_gre']}, {p['gre_if']} {gre}) | {p['frps_svc']} :{p['frp_port']} {frp} | ports: {','.join(map(str, p.get('ports', [])))}")
+    print(f"#{p['id']} {p['name']}: {p['remote_pub']} (GRE {p['local_gre']} <-> {p['peer_gre']}, {gif} {gre}) | {p['frps_svc']} :{p['frp_port']} {frp} | ports: {','.join(map(str, p.get('ports', [])))}")
 PYEOF
 }
 
@@ -2668,7 +2757,7 @@ doctor_stop_server() { pkill -f "iperf3 -s" >/dev/null 2>&1 || true; echo -e "${
 
 doctor_health_check() {
     echo -e "\n${CYAN}=============================================================="
-    echo "         HASHEM SYSTEM & TUNNEL HEALTH CHECK (CLI MODE)"
+    echo "          HASHEM SYSTEM & TUNNEL HEALTH CHECK (CLI MODE)"
     echo -e "==============================================================${NC}"
     local FAIL_COUNT=0 WARN_COUNT=0
     report_item() {
@@ -2925,6 +3014,7 @@ init_watchdog_json() {
   "tg_tunnel_port": 0,
   "backup_every_hours": 0,
   "backup_daily_at": "",
+  "last_backup_ts": 0,
   "last_check": "",
   "consec_fails": 0,
   "last_alert": ""
@@ -2948,12 +3038,16 @@ watchdog_check() {
     init_watchdog_json
     local PEER_GRE GRE_OK=0 FRP_OK=0
     PEER_GRE=$(watchdog_get_peer_gre)
-    [[ -n "$PEER_GRE" ]] && ping -c 1 -W 2 "$PEER_GRE" >/dev/null 2>&1 && GRE_OK=1
+    if [[ -n "$PEER_GRE" ]]; then
+        ping -c 1 -W 2 "$PEER_GRE" >/dev/null 2>&1 && GRE_OK=1
+    elif [[ -f "/etc/backhaul/config.toml" || -f "/etc/backhaul/client.toml" ]]; then
+        GRE_OK=1
+    fi
     for svc in frpc frps backhaul-client backhaul-server; do
         systemctl is-active --quiet "$svc" 2>/dev/null && { FRP_OK=1; break; }
     done
     if [[ $GRE_OK -eq 1 && $FRP_OK -eq 1 ]]; then
-        echo "WATCHDOG status=up detail=Tunnel healthy ($PEER_GRE)"
+        echo "WATCHDOG status=up detail=Tunnel healthy (${PEER_GRE:-no-gre})"
     else
         echo "WATCHDOG status=down detail=GRE_OK=${GRE_OK},SERVICE_OK=${FRP_OK}"
     fi
@@ -2964,7 +3058,12 @@ watchdog_send() {
     [[ -z "$TEXT" ]] && return 1
     init_watchdog_json
     local CFG TG_TOKEN TG_CHAT_ID
-    CFG=$(python3 -c "import json; d=json.load(open('$WATCHDOG_FILE')); print(f\"{d.get('tg_bot_token','')}\t{d.get('tg_chat_id','')}\")" 2>/dev/null)
+    CFG=$(python3 - "$WATCHDOG_FILE" <<'PY' 2>/dev/null
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(f"{d.get('tg_bot_token','')}\t{d.get('tg_chat_id','')}")
+PY
+)
     IFS=$'\t' read -r TG_TOKEN TG_CHAT_ID <<< "$CFG"
     [[ -z "$TG_TOKEN" || -z "$TG_CHAT_ID" ]] && return 1
     curl -sS -f --max-time 15 -d "chat_id=${TG_CHAT_ID}" --data-urlencode "text=[Hashem $(hostname)] ${TEXT}" "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" >/dev/null
@@ -2994,6 +3093,26 @@ watchdog_tick() {
     CHECK_OUT=$(watchdog_check)
     if [[ "$CHECK_OUT" == *"status=down"* ]]; then
         restart_all_lite
+    fi
+    # Check scheduled backup
+    if command -v python3 >/dev/null 2>&1 && [[ -f "$WATCHDOG_FILE" ]]; then
+        local DO_BKP
+        DO_BKP=$(python3 - "$WATCHDOG_FILE" <<'PY' 2>/dev/null || echo 0
+import json, sys, time
+p = sys.argv[1]
+d = json.load(open(p))
+now = int(time.time())
+every_h = int(d.get("backup_every_hours", 0) or 0)
+last_b = int(d.get("last_backup_ts", 0) or 0)
+if every_h > 0 and (now - last_b) >= every_h * 3600:
+    d["last_backup_ts"] = now
+    json.dump(d, open(p, "w"), indent=2)
+    print(1)
+else:
+    print(0)
+PY
+)
+        [[ "$DO_BKP" == "1" ]] && backup_now >/dev/null 2>&1 || true
     fi
 }
 
@@ -3027,13 +3146,25 @@ watchdog_on() {
     init_watchdog_json
     install_watchdog_units
     systemctl enable --now hashem-watchdog.timer >/dev/null 2>&1
-    python3 -c "import json; p='$WATCHDOG_FILE'; d=json.load(open(p)); d['enabled']=True; json.dump(d,open(p,'w'),indent=2)" 2>/dev/null || true
+    python3 - "$WATCHDOG_FILE" <<'PY' 2>/dev/null || true
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["enabled"] = True
+json.dump(d, open(p, "w"), indent=2)
+PY
     echo -e "${GREEN}[OK] Watchdog enabled.${NC}"
 }
 
 watchdog_off() {
     systemctl disable --now hashem-watchdog.timer >/dev/null 2>&1 || true
-    python3 -c "import json; p='$WATCHDOG_FILE'; d=json.load(open(p)); d['enabled']=False; json.dump(d,open(p,'w'),indent=2)" 2>/dev/null || true
+    python3 - "$WATCHDOG_FILE" <<'PY' 2>/dev/null || true
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["enabled"] = False
+json.dump(d, open(p, "w"), indent=2)
+PY
     echo -e "${YELLOW}[*] Watchdog disabled.${NC}"
 }
 
@@ -3075,7 +3206,15 @@ menu_watchdog() {
             3)
                 read -p "Bot Token: " T_TOK
                 read -p "Chat ID: " T_CID
-                python3 -c "import json; p='$WATCHDOG_FILE'; d=json.load(open(p)); d['tg_bot_token']='$T_TOK'; d['tg_chat_id']='$T_CID'; json.dump(d,open(p,'w'),indent=2)" 2>/dev/null || true
+                init_watchdog_json
+                python3 - "$WATCHDOG_FILE" "$T_TOK" "$T_CID" <<'PY' 2>/dev/null || true
+import json, sys
+p, tok, cid = sys.argv[1:4]
+d = json.load(open(p))
+d["tg_bot_token"] = tok
+d["tg_chat_id"] = cid
+json.dump(d, open(p, "w"), indent=2)
+PY
                 echo -e "${GREEN}[OK] Saved.${NC}"; pause_prompt ;;
             4) watchdog_test; pause_prompt ;;
             5) backup_now; pause_prompt ;;
@@ -3091,9 +3230,9 @@ menu_watchdog() {
 
 backup_file_list() {
     local f
-    for f in /etc/frp/*.toml /etc/backhaul/*.toml "$PANEL_CONFIG_DIR"/*.json "$PANEL_CONFIG_DIR"/backup.key /etc/systemd/system/gre-*.service /etc/systemd/system/frps*.service /etc/systemd/system/frpc*.service /etc/systemd/system/backhaul-*.service; do
+    for f in /etc/frp/*.toml /etc/backhaul/*.toml "$PANEL_CONFIG_DIR"/*.json "$PANEL_CONFIG_DIR"/backup.key /etc/systemd/system/gre-*.service /etc/systemd/system/frps*.service /etc/systemd/system/frpc*.service /etc/systemd/system/backhaul-*.service /etc/systemd/system/backhaul*.service; do
         [[ -f "$f" ]] && echo "$f"
-    done
+    done | sort -u
 }
 
 backup_now() {
@@ -3131,9 +3270,34 @@ cli_backup() {
         schedule)
             init_watchdog_json
             case "${1:-}" in
-                --every) python3 -c "import json; p='$WATCHDOG_FILE'; d=json.load(open(p)); d['backup_every_hours']=int('${2:-6}'); json.dump(d,open(p,'w'),indent=2)" ;;
-                --daily) python3 -c "import json; p='$WATCHDOG_FILE'; d=json.load(open(p)); d['backup_daily_at']='${2:-03:00}'; json.dump(d,open(p,'w'),indent=2)" ;;
-                --off)   python3 -c "import json; p='$WATCHDOG_FILE'; d=json.load(open(p)); d['backup_every_hours']=0; d['backup_daily_at']=''; json.dump(d,open(p,'w'),indent=2)" ;;
+                --every)
+                    python3 - "$WATCHDOG_FILE" "${2:-6}" <<'PY'
+import json, sys
+p, hrs = sys.argv[1], int(sys.argv[2])
+d = json.load(open(p))
+d["backup_every_hours"] = hrs
+json.dump(d, open(p, "w"), indent=2)
+PY
+                    ;;
+                --daily)
+                    python3 - "$WATCHDOG_FILE" "${2:-03:00}" <<'PY'
+import json, sys
+p, at = sys.argv[1], sys.argv[2]
+d = json.load(open(p))
+d["backup_daily_at"] = at
+json.dump(d, open(p, "w"), indent=2)
+PY
+                    ;;
+                --off)
+                    python3 - "$WATCHDOG_FILE" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["backup_every_hours"] = 0
+d["backup_daily_at"] = ""
+json.dump(d, open(p, "w"), indent=2)
+PY
+                    ;;
             esac
             echo -e "${GREEN}[OK] Backup schedule updated.${NC}"
             ;;
@@ -3227,6 +3391,16 @@ menu_carrier() {
 }
 
 # ---- Bagher Engine [PRO] (No Web Dashboard) ----
+bagher_get_or_create_token() {
+    mkdir -p "${PANEL_CONFIG_DIR}/bagher"
+    local tf="${PANEL_CONFIG_DIR}/bagher/token"
+    if [[ ! -s "$tf" ]]; then
+        gen_token32 > "$tf"
+        chmod 600 "$tf" 2>/dev/null || true
+    fi
+    cat "$tf"
+}
+
 cli_bagher() {
     local SUB="${1:-status}"
     case "$SUB" in
@@ -3263,6 +3437,7 @@ cli_bagher() {
             mkdir -p /root/.ssh
             [[ -f /root/.ssh/hashem-fwd ]] || ssh-keygen -t ed25519 -N "" -f /root/.ssh/hashem-fwd -C "hashem-ssh-carrier" >/dev/null 2>&1
             local PUBKEY=$(cat /root/.ssh/hashem-fwd.pub)
+            local BAGHER_TOKEN=$(bagher_get_or_create_token)
             IFS=',' read -ra PORT_ARR <<< "$PORTS"
             local PORT_OPT=""
             [[ "$SSH_PORT" != "22" && -n "$SSH_PORT" ]] && PORT_OPT="-p $SSH_PORT"
@@ -3273,7 +3448,7 @@ cli_bagher() {
 bindAddr = "127.0.0.1"
 bindPort = ${FRP_PORT}
 proxyBindAddr = "0.0.0.0"
-auth.token = "hashem-bagher-sec"
+auth.token = "${BAGHER_TOKEN}"
 transport.tcpMux = false
 EOF
                 cat <<EOF > /etc/systemd/system/hashem-bagher-frps.service
@@ -3356,8 +3531,9 @@ EOF
             mkdir -p /root/.ssh
             [[ -f /root/.ssh/hashem-fwd ]] || ssh-keygen -t ed25519 -N "" -f /root/.ssh/hashem-fwd -C "hashem-ssh-carrier" >/dev/null 2>&1
             local PUBKEY=$(cat /root/.ssh/hashem-fwd.pub)
+            local BAGHER_TOKEN=$(bagher_get_or_create_token)
             local MY_IP=$(get_public_ip)
-            local B64=$(printf '{"v":1,"role":"foreign","iran_pub":"%s","frp_port":55400,"ports":[443,8443,1020,1030,1040],"token":"hashem-bagher-sec","pool_count":25,"ssh_pub_key":"%s","ssh_port":22}' "$MY_IP" "$PUBKEY" | base64 | tr -d '\n\r ')
+            local B64=$(printf '{"v":1,"role":"foreign","iran_pub":"%s","frp_port":55400,"ports":[443,8443,1020,1030,1040],"token":"%s","pool_count":25,"ssh_pub_key":"%s","ssh_port":22}' "$MY_IP" "$BAGHER_TOKEN" "$PUBKEY" | base64 | tr -d '\n\r ')
             echo "BAGHER:${B64}"
             ;;
         apply-bundle)
@@ -3367,7 +3543,8 @@ EOF
             local PUBKEY=$(echo "$DECODED" | grep -o '"ssh_pub_key":"[^"]*"' | cut -d'"' -f4)
             local FRP_PORT=$(echo "$DECODED" | grep -o '"frp_port":[0-9]*' | cut -d':' -f2)
             local POOL_COUNT=$(echo "$DECODED" | grep -o '"pool_count":[0-9]*' | cut -d':' -f2)
-            FRP_PORT="${FRP_PORT:-55400}"; POOL_COUNT="${POOL_COUNT:-25}"
+            local BAGHER_TOKEN=$(echo "$DECODED" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+            FRP_PORT="${FRP_PORT:-55400}"; POOL_COUNT="${POOL_COUNT:-25}"; BAGHER_TOKEN="${BAGHER_TOKEN:-hashem-bagher-sec}"
             mkdir -p /root/.ssh && touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
             echo "restrict,port-forwarding,permitopen=\"127.0.0.1:${FRP_PORT}\" $PUBKEY" >> /root/.ssh/authorized_keys
             install_frp_binaries "client" || true
@@ -3375,7 +3552,7 @@ EOF
             cat <<EOF > "${PANEL_CONFIG_DIR}/bagher/frpc.toml"
 serverAddr = "127.0.0.1"
 serverPort = ${FRP_PORT}
-auth.token = "hashem-bagher-sec"
+auth.token = "${BAGHER_TOKEN}"
 transport.tcpMux = false
 transport.poolCount = ${POOL_COUNT}
 loginFailExit = false
@@ -3501,11 +3678,21 @@ PY
             if ip link show "$TUNNEL_NAME" >/dev/null 2>&1; then
                 ip tunnel change "$TUNNEL_NAME" remote "$NEW_IP" >/dev/null 2>&1 || true
             fi
+            if [[ -f "/etc/systemd/system/${TUNNEL_NAME}.service" ]]; then
+                sed -i -E "s/remote [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/remote ${NEW_IP}/g" "/etc/systemd/system/${TUNNEL_NAME}.service" 2>/dev/null || true
+                systemctl daemon-reload >/dev/null 2>&1 || true
+            fi
             echo -e "${GREEN}[OK] Switched active foreign endpoint to ${TARGET} (${NEW_IP}).${NC}"
             ;;
         set-mode)
             local MODE="${1:-wrr}"
-            python3 -c "import json; f='$CLUSTER_FILE'; d=json.load(open(f)); d['mode']='$MODE'; json.dump(d,open(f,'w'),indent=2)"
+            python3 - "$CLUSTER_FILE" "$MODE" <<'PY'
+import json, sys
+f, mode = sys.argv[1], sys.argv[2]
+d = json.load(open(f))
+d["mode"] = mode
+json.dump(d, open(f, "w"), indent=2)
+PY
             echo -e "${GREEN}[OK] Cluster balancing strategy set to: ${MODE}.${NC}"
             ;;
         revert)
@@ -3527,29 +3714,61 @@ pause_prompt() {
 }
 
 setup_backhaul_iran_interactive() {
+    echo -e "\n${YELLOW}=== CONFIGURING IRAN BACKHAUL SERVER (NO-GRE) ===${NC}"
     local MYIP LOCAL_PUB REMOTE_PUB PORT TOKEN TRANSPORT PORTS
     MYIP=$(get_public_ip)
     prompt_ip LOCAL_PUB "Enter IRAN Server Public IP" "$MYIP"
     prompt_ip REMOTE_PUB "Enter FOREIGN Server Public IP" ""
     prompt_port PORT "Enter Backhaul Server Port" "$(gen_random_port)"
     prompt_token TOKEN "Enter Secret Auth Token" "$(gen_token32)"
-    read -p "Transport [tcpmux/ws/wss] (default tcpmux): " TRANSPORT
+    read -p "Transport [tcpmux/tcp/ws/wss/udp] (default tcpmux): " TRANSPORT
     TRANSPORT=${TRANSPORT:-tcpmux}
     prompt_ports PORTS "Enter Ports to Reverse-Tunnel (e.g. 443, 2083)"
     setup_backhaul_iran_server_noninteractive "$LOCAL_PUB" "$REMOTE_PUB" "$PORT" "$TOKEN" "$TRANSPORT" "$PORTS"
 }
 
+setup_backhaul_foreign_interactive() {
+    echo -e "\n${YELLOW}=== CONFIGURING FOREIGN BACKHAUL CLIENT (NO-GRE) ===${NC}"
+    local MYIP LOCAL_PUB REMOTE_PUB PORT TOKEN TRANSPORT
+    MYIP=$(get_public_ip)
+    prompt_ip LOCAL_PUB "Enter FOREIGN Server Public IP" "$MYIP"
+    prompt_ip REMOTE_PUB "Enter IRAN Server Public IP" ""
+    prompt_port PORT "Enter Backhaul Server Port (same as IRAN)" "$(gen_random_port)"
+    prompt_required TOKEN "Enter Secret Auth Token (same as IRAN)"
+    read -p "Transport [tcpmux/tcp/ws/wss/udp] (default tcpmux): " TRANSPORT
+    TRANSPORT=${TRANSPORT:-tcpmux}
+    setup_backhaul_foreign_server_noninteractive "$LOCAL_PUB" "$REMOTE_PUB" "$PORT" "$TOKEN" "$TRANSPORT"
+}
+
 setup_gre_backhaul_iran_interactive() {
+    echo -e "\n${YELLOW}=== CONFIGURING IRAN GRE + BACKHAUL SERVER ===${NC}"
     local MYIP LOCAL_PUB REMOTE_PUB PORT TOKEN TRANSPORT PORTS
     MYIP=$(get_public_ip)
     prompt_ip LOCAL_PUB "Enter IRAN Server Public IP" "$MYIP"
     prompt_ip REMOTE_PUB "Enter FOREIGN Server Public IP" ""
     prompt_port PORT "Enter Backhaul Server Port" "$(gen_random_port)"
     prompt_token TOKEN "Enter Secret Auth Token" "$(gen_token32)"
-    read -p "Transport [tcpmux/ws/wss] (default tcpmux): " TRANSPORT
+    read -p "Transport [tcpmux/tcp/ws/wss/udp] (default tcpmux): " TRANSPORT
     TRANSPORT=${TRANSPORT:-tcpmux}
     prompt_ports PORTS "Enter Ports to Reverse-Tunnel (e.g. 443, 2083)"
     setup_gre_backhaul_iran_server_noninteractive "$LOCAL_PUB" "$REMOTE_PUB" "$PORT" "$TOKEN" "$IRAN_GRE_IP" "$FOREIGN_GRE_IP" "$TRANSPORT" "$PORTS"
+}
+
+setup_gre_backhaul_foreign_interactive() {
+    echo -e "\n${YELLOW}=== CONFIGURING FOREIGN GRE + BACKHAUL CLIENT ===${NC}"
+    local MYIP LOCAL_PUB REMOTE_PUB PORT TOKEN TRANSPORT LOCAL_GRE_SET="$FOREIGN_GRE_IP" PEER_GRE_SET="$IRAN_GRE_IP"
+    MYIP=$(get_public_ip)
+    prompt_ip LOCAL_PUB "Enter FOREIGN Server Public IP" "$MYIP"
+    prompt_ip REMOTE_PUB "Enter IRAN Server Public IP" ""
+    prompt_port PORT "Enter Backhaul Server Port (same as IRAN)" "$(gen_random_port)"
+    prompt_required TOKEN "Enter Secret Auth Token (same as IRAN)"
+    read -p "Transport [tcpmux/tcp/ws/wss/udp] (default tcpmux): " TRANSPORT
+    TRANSPORT=${TRANSPORT:-tcpmux}
+    read -p "Local GRE IP [Default: ${LOCAL_GRE_SET}]: " _LG
+    [[ -n "$_LG" ]] && is_valid_ip "$_LG" && LOCAL_GRE_SET="$_LG"
+    read -p "Peer (IRAN) GRE IP [Default: ${PEER_GRE_SET}]: " _PG
+    [[ -n "$_PG" ]] && is_valid_ip "$_PG" && PEER_GRE_SET="$_PG"
+    setup_gre_backhaul_foreign_server_noninteractive "$LOCAL_PUB" "$REMOTE_PUB" "$PORT" "$TOKEN" "$LOCAL_GRE_SET" "$PEER_GRE_SET" "$TRANSPORT"
 }
 
 ensure_modified_backhaul_core() {
@@ -3558,17 +3777,33 @@ ensure_modified_backhaul_core() {
 }
 
 menu_modified_backhaul() {
-    ensure_modified_backhaul_core
+    ensure_modified_backhaul_core || { pause_prompt; return 1; }
     local SCRIPT_TARGET="/usr/local/bin/hashem-backhaul.sh"
     if [[ ! -f "$SCRIPT_TARGET" ]]; then
         download_with_fallback "$SCRIPT_TARGET" "https://raw.githubusercontent.com/pdnczone/hashem-panel/main/hashem-backhaul.sh" 30 || true
         chmod +x "$SCRIPT_TARGET" 2>/dev/null || true
     fi
-    if [[ -x "$SCRIPT_TARGET" ]]; then
+    if [[ -x "$SCRIPT_TARGET" ]] && bash -n "$SCRIPT_TARGET" 2>/dev/null; then
         bash "$SCRIPT_TARGET" "$@"
     else
-        echo -e "${RED}[!] Could not locate or download hashem-backhaul.sh.${NC}"
-        pause_prompt
+        echo -e "\n${CYAN}=== Backhaul v0.7.2 Native Setup Menu ===${NC}"
+        echo "  1) Setup IRAN Backhaul Server (No-GRE / TCPMux / WS / WSS)"
+        echo "  2) Setup FOREIGN Backhaul Client (No-GRE / TCPMux / WS / WSS)"
+        echo "  3) Setup IRAN GRE + Backhaul Server"
+        echo "  4) Setup FOREIGN GRE + Backhaul Client"
+        echo "  5) Re-download / Verify Backhaul Core Binary (v0.7.2)"
+        echo "  0) Back"
+        echo ""
+        local BH_OPT
+        read -p "Select an option [0-5]: " BH_OPT
+        case "$BH_OPT" in
+            1) setup_backhaul_iran_interactive; pause_prompt ;;
+            2) setup_backhaul_foreign_interactive; pause_prompt ;;
+            3) setup_gre_backhaul_iran_interactive; pause_prompt ;;
+            4) setup_gre_backhaul_foreign_interactive; pause_prompt ;;
+            5) install_backhaul_binaries 1; pause_prompt ;;
+            0) return 0 ;;
+        esac
     fi
 }
 
@@ -3605,16 +3840,31 @@ menu_quick_setup() {
         clear
         show_banner
         echo -e "${CYAN}=== QUICK TUNNEL SETUP ===${NC}"
-        echo "  1) Setup Iran Server (Create Key & Share Connection Info)"
-        echo "  2) Setup Foreign Server (Manual Entry)"
-        echo "  3) Setup Backhaul Tunnel (TCPMux, ICMP, TUN)"
+        echo "  1) Setup Iran Server (GRE + FRP)"
+        echo "  2) Setup Foreign Server (GRE + FRP)"
+        echo "  3) Setup Backhaul v0.7.2 Tunnel (Iran / Foreign / GRE+Backhaul)"
         echo "  0) Back to Main Menu"
         echo ""
         read -p "Select an option [0-3]: " QS_OPT
         case "$QS_OPT" in
             1) setup_iran_server; pause_prompt ;;
             2) setup_foreign_server; pause_prompt ;;
-            3) menu_modified_backhaul ;;
+            3)
+                echo ""
+                echo "  1) Setup IRAN Backhaul Server (No-GRE / TCPMux / WS / WSS)"
+                echo "  2) Setup FOREIGN Backhaul Client (No-GRE / TCPMux / WS / WSS)"
+                echo "  3) Setup IRAN GRE + Backhaul Server"
+                echo "  4) Setup FOREIGN GRE + Backhaul Client"
+                echo "  5) Modified Backhaul (IPX / ICMP / TUN)"
+                read -p "Select Backhaul mode [1-5]: " QB_OPT
+                case "$QB_OPT" in
+                    1) setup_backhaul_iran_interactive; pause_prompt ;;
+                    2) setup_backhaul_foreign_interactive; pause_prompt ;;
+                    3) setup_gre_backhaul_iran_interactive; pause_prompt ;;
+                    4) setup_gre_backhaul_foreign_interactive; pause_prompt ;;
+                    5) menu_modified_backhaul ;;
+                esac
+                ;;
             0|q) return 0 ;;
         esac
     done
@@ -3626,7 +3876,7 @@ menu_tunnel() {
         show_banner
         echo -e "${CYAN}--- [ TUNNEL MANAGEMENT ] ---${NC}"
         echo "  1) Setup IRAN Tunnel (GRE + FRPS / Backhaul Server)"
-        echo "  2) Setup FOREIGN Tunnel (Manual Entry)"
+        echo "  2) Setup FOREIGN Tunnel (GRE + FRPC / Backhaul Client)"
         echo "  3) Add Peer Tunnel (Multi-foreign servers on Iran)"
         echo "  4) List Peers & Show Connection Info"
         echo "  5) Edit Peer Tunnel Configuration (Ports, IP, Carrier, Name)"
@@ -3652,7 +3902,17 @@ menu_tunnel() {
                     4) menu_modified_backhaul ;;
                 esac
                 pause_prompt ;;
-            2) setup_foreign_server; pause_prompt ;;
+            2)
+                echo "  1) GRE + FRP Client (Recommended)"
+                echo "  2) Backhaul Client (No-GRE / TCPMux)"
+                echo "  3) GRE + Backhaul Client"
+                read -p "Select [1-3]: " FR_PROTO
+                case "$FR_PROTO" in
+                    1) setup_foreign_server ;;
+                    2) setup_backhaul_foreign_interactive ;;
+                    3) setup_gre_backhaul_foreign_interactive ;;
+                esac
+                pause_prompt ;;
             3) menu_add_peer; pause_prompt ;;
             4)
                 peer_list_pretty
@@ -3858,7 +4118,7 @@ menu_maintenance() {
         show_banner
         echo -e "${CYAN}--- [ MAINTENANCE & UPDATE ] ---${NC}"
         echo "  1) Update Script (hashem.sh CLI only — No Web Panel)"
-        echo "  2) Pre-cache / Verify Core Binaries (FRP & Backhaul)"
+        echo "  2) Pre-cache / Re-verify Core Binaries (FRP & Backhaul v0.7.2)"
         echo "  3) Install / Refresh System Dependencies"
         echo "  4) Check & Load Kernel Modules (GRE & FOU)"
         echo "  5) Show System Version & Tuning Status"
@@ -3867,7 +4127,7 @@ menu_maintenance() {
         read -p "Select an option [0-5]: " M_OPT
         case "$M_OPT" in
             1) backup_configs "pre_update"; update_all; pause_prompt ;;
-            2) install_frp_binaries "all" || true; install_backhaul_binaries || true; pause_prompt ;;
+            2) install_frp_binaries "all" || true; install_backhaul_binaries 1 || true; pause_prompt ;;
             3) rm -f "${PANEL_CONFIG_DIR}/.deps_installed"; ensure_dependencies_smart; pause_prompt ;;
             4) carrier_init_kernel; echo -e "${GREEN}[OK] Kernel modules ip_gre & fou checked.${NC}"; pause_prompt ;;
             5) echo "Hashem Script Version: $HASHEM_VERSION"; tune_status; pause_prompt ;;
@@ -4141,7 +4401,7 @@ if [[ $# -gt 0 ]]; then
         tune-status) tune_status ;;
         free-ram|optimize-ram) free_ram ;;
         download-cores|cores)
-            install_frp_binaries "all" && install_backhaul_binaries
+            install_frp_binaries "all" && install_backhaul_binaries 1
             ;;
         modified-backhaul|backhaul-premium|mbh) shift; menu_modified_backhaul "$@" ;;
         remove-tunnel)
